@@ -5,7 +5,7 @@ pipeline {
 
   /* 2️⃣  Global settings */
   environment {
-    AWS_REGION     = 'us‑east‑1'
+    AWS_REGION     = 'us-east-1'
     ECR_REGISTRY   = '732583169994.dkr.ecr.us-east-1.amazonaws.com'
     IMAGE_NAME     = 'regapp'
   }
