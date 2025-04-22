@@ -5,6 +5,7 @@ pipeline {
     AWS_REGION   = 'us-east-1'         // re‑typed ASCII dashes
     ECR_REGISTRY = '732583169994.dkr.ecr.us-east-1.amazonaws.com'
     IMAGE_NAME   = 'regapp'
+    ANSIBLE_COLLECTIONS_PATHS = '/root/.ansible/collections:/usr/share/ansible/collections'
   }
 
   parameters {
