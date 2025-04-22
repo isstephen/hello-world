@@ -2,7 +2,7 @@
   hosts: dockerhost
   become: true
   vars:
-    ansible_python_interpreter: /usr/bin/python3
+    ansible_python_interpreter: /home/ansadmin/ansible-venv/bin/python
     app_name: regapp
     app_tag: latest
     aws_account_id: "732583169994"
