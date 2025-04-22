@@ -5,7 +5,7 @@ pipeline {
     AWS_REGION   = 'us-east-1'
     ECR_REGISTRY = '732583169994.dkr.ecr.us-east-1.amazonaws.com'
     IMAGE_NAME   = 'regapp'
-    ANSIBLE_COLLECTIONS_PATHS = '/root/.ansible/collections:/usr/share/ansible/collections'
+    ANSIBLE_COLLECTIONS_PATHS = '/var/lib/jenkins/.ansible/collections:/usr/share/ansible/collections'
   }
 
   parameters {
@@ -27,7 +27,7 @@ pipeline {
         ]]) {
           sh '''
             aws ecr get-login-password --region $AWS_REGION | \
-              docker login --username AWS --password-stdin $ECR_REGISTRY
+            docker login --username AWS --password-stdin $ECR_REGISTRY
           '''
         }
       }
@@ -56,9 +56,9 @@ pipeline {
     stage('Ansible Deploy') {
       steps {
         sh '''
-          export ANSIBLE_COLLECTIONS_PATHS=/var/lib/jenkins/.ansible/collections:/usr/share/ansible/collections
+          export ANSIBLE_COLLECTIONS_PATHS=$ANSIBLE_COLLECTIONS_PATHS
           ansible-playbook /var/lib/jenkins/workspace/newdeployment/regapp.yml \
-            -e "app_tag=${VERSION}" \
+            -e app_tag=$VERSION \
             -u ansadmin \
             --private-key=/var/lib/jenkins/.ssh/id_rsa
         '''
@@ -67,8 +67,13 @@ pipeline {
   }
 
   post {
-    success { echo "✅  $IMAGE_NAME:$VERSION pushed & deployed." }
-    failure { echo "❌  Deployment failed – check the console log." }
+    success {
+      echo "✅  $IMAGE_NAME:$VERSION pushed & deployed."
+    }
+    failure {
+      echo "❌  Deployment failed – check the console log."
+    }
   }
 }
+
 
