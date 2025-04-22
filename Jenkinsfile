@@ -56,8 +56,8 @@ pipeline {
     stage('Ansible Deploy') {
       steps {
         sh '''
-          export ANSIBLE_COLLECTIONS_PATHS="/root/.ansible/collections:/usr/share/ansible/collections"
-          ansible-playbook /var/lib/jenkins/workspace/newdeployment/regapp.yml -e "app_tag=$VERSION"
+          export ANSIBLE_COLLECTIONS_PATHS=/var/lib/jenkins/.ansible/collections:/usr/share/ansible/collections
+          ansible-playbook /var/lib/jenkins/workspace/newdeployment/regapp.yml -e "app_tag=${VERSION}"
         '''
       }
     }
