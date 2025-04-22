@@ -36,8 +36,11 @@ pipeline {
     stage('Build & Tag') {
       steps {
         sh '''
+          echo "🔨 Building Docker image..."
           docker build -t $IMAGE_NAME:$VERSION .
+          echo "🏷️ Tagging image with version and latest..."
           docker tag $IMAGE_NAME:$VERSION $ECR_REGISTRY/$IMAGE_NAME:$VERSION
+          docker tag $IMAGE_NAME:$VERSION $ECR_REGISTRY/$IMAGE_NAME:latest
         '''
       }
     }
