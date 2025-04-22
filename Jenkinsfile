@@ -50,7 +50,7 @@ pipeline {
 
     stage('Ansible Deploy') {
       steps {
-        sh 'ansible-playbook /opt/docker/regapp.yml -e "app_tag=${VERSION}"'
+        sh 'ansible-playbook /var/lib/jenkins/workspace/newdeployment/regapp-deploy.yml -e "app_tag=${VERSION}"'
       }
     }
   }
