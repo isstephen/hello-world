@@ -1,0 +1,46 @@
+---
+- name: Deploy regapp Docker application from ECR
+  hosts: dockerhost
+  become: true
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+    app_name: regapp
+    app_tag: latest
+    aws_account_id: "732583169994"
+    aws_region: "us-east-1"
+    ecr_repo: "regapp"
+    ecr_image: "{{ aws_account_id }}.dkr.ecr.{{ aws_region }}.amazonaws.com/{{ ecr_repo }}:{{ app_tag }}"
+    app_port: 8089
+
+  tasks:
+    - name: Authenticate Docker to ECR
+      shell: |
+        aws ecr get-login-password --region {{ aws_region }} | docker login --username AWS --password-stdin {{ aws_account_id }}.dkr.ecr.{{ aws_region }}.amazonaws.com
+      register: ecr_login
+      changed_when: false
+    - name: Stop existing container if running
+      community.docker.docker_container:
+        name: "{{ app_name }}"
+        state: stopped
+        force_kill: true
+      when: container_info is defined and container_info.exists
+      ignore_errors: true
+
+    - name: Remove existing container
+      community.docker.docker_container:
+        name: "{{ app_name }}"
+        state: absent
+      ignore_errors: true
+
+    - name: Pull image from ECR
+      community.docker.docker_image:
+        name: "{{ ecr_image }}"
+        source: pull
+
+    - name: Run container from ECR image
+      community.docker.docker_container:
+        name: "{{ app_name }}"
+        image: "{{ ecr_image }}"
+        ports:
+          - "{{ app_port }}:8080"
+        restart_policy: always
