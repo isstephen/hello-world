@@ -1,19 +1,23 @@
 pipeline {
-  agent { label 'docker' }             // make sure this node has Docker
+  agent { label 'docker' }
 
   environment {
-    AWS_REGION   = 'us-east-1'         // re‑typed ASCII dashes
+    AWS_REGION   = 'us-east-1'
     ECR_REGISTRY = '732583169994.dkr.ecr.us-east-1.amazonaws.com'
     IMAGE_NAME   = 'regapp'
     ANSIBLE_COLLECTIONS_PATHS = '/root/.ansible/collections:/usr/share/ansible/collections'
   }
 
   parameters {
-    string(name: 'VERSION', defaultValue: 'v2.4', description: 'Docker image tag')
+    string(name: 'VERSION', defaultValue: 'v3.2', description: 'Docker image tag')
   }
 
   stages {
-    stage('Checkout') { steps { checkout scm } }
+    stage('Checkout') {
+      steps {
+        checkout scm
+      }
+    }
 
     stage('Login to ECR') {
       steps {
@@ -33,7 +37,7 @@ pipeline {
       steps {
         sh '''
           docker build -t $IMAGE_NAME:$VERSION .
-          docker tag    $IMAGE_NAME:$VERSION $ECR_REGISTRY/$IMAGE_NAME:$VERSION
+          docker tag $IMAGE_NAME:$VERSION $ECR_REGISTRY/$IMAGE_NAME:$VERSION
         '''
       }
     }
@@ -51,7 +55,10 @@ pipeline {
 
     stage('Ansible Deploy') {
       steps {
-        sh 'ansible-playbook /var/lib/jenkins/workspace/newdeployment/regapp.yml -e "app_tag=${VERSION}"'
+        sh '''
+          export ANSIBLE_COLLECTIONS_PATHS="/root/.ansible/collections:/usr/share/ansible/collections"
+          ansible-playbook /var/lib/jenkins/workspace/newdeployment/regapp.yml -e "app_tag=$VERSION"
+        '''
       }
     }
   }
@@ -61,3 +68,4 @@ pipeline {
     failure { echo "❌  Deployment failed – check the console log." }
   }
 }
+
