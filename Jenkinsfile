@@ -58,6 +58,9 @@ pipeline {
         sh '''
           export ANSIBLE_COLLECTIONS_PATHS=/var/lib/jenkins/.ansible/collections:/usr/share/ansible/collections
           ansible-playbook /var/lib/jenkins/workspace/newdeployment/regapp.yml -e "app_tag=${VERSION}"
+          -e "app_tag=${VERSION}" \
+          -u ansadmin \
+          --private-key=/var/lib/jenkins/.ssh/id_rsa
         '''
       }
     }
