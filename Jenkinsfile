@@ -32,7 +32,14 @@ pipeline {
         }
       }
     }
-
+    
+    stage('Build WAR') {
+      steps {
+        sh 'mvn clean package'
+        sh 'cp target/*.war ./'
+      }
+    }
+    
     stage('Build & Tag') {
       steps {
         sh '''
