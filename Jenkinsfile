@@ -58,7 +58,10 @@ pipeline {
           $class: 'AmazonWebServicesCredentialsBinding',
           credentialsId: 'aws-ecr-push'
         ]]) {
-          sh 'docker push $ECR_REGISTRY/$IMAGE_NAME:$VERSION'
+        sh '''
+          docker push $ECR_REGISTRY/$IMAGE_NAME:$VERSION
+          docker push $ECR_REGISTRY/$IMAGE_NAME:latest
+        '''
         }
       }
     }
