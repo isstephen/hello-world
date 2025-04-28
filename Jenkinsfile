@@ -6,72 +6,68 @@ pipeline {
     ECR_REGISTRY = '732583169994.dkr.ecr.us-east-1.amazonaws.com'
     IMAGE_NAME   = 'regapp'
     ANSIBLE_COLLECTIONS_PATHS = '/var/lib/jenkins/.ansible/collections:/usr/share/ansible/collections'
+    ANSIBLE_SERVER = '10.0.101.39'
+    ANSIBLE_USER   = 'ansadmin'
+    SSH_KEY_PATH   = '/var/lib/jenkins/.ssh/id_rsa'
   }
 
   parameters {
-    string(name: 'VERSION', defaultValue: 'v3.2', description: 'Docker image tag')
+    string(name: 'VERSION', defaultValue: 'v3.4', description: 'Docker image tag')
   }
 
   stages {
-    stage('Checkout') {
+    stage('Checkout Code') {
       steps {
         checkout scm
       }
     }
 
-    stage('Login to ECR') {
+    stage('Login to AWS ECR') {
       steps {
         withCredentials([[
           $class: 'AmazonWebServicesCredentialsBinding',
           credentialsId: 'aws-ecr-push'
         ]]) {
           sh '''
-            aws ecr get-login-password --region $AWS_REGION | \
-            docker login --username AWS --password-stdin $ECR_REGISTRY
+            aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
           '''
         }
       }
     }
-    
-    stage('Build WAR') {
-      steps {
-        sh 'mvn clean package'
-        sh 'cp webapp/target/*.war ./'
-      }
-    }
-    
-    stage('Build & Tag') {
+
+    stage('Build WAR and Docker Image') {
       steps {
         sh '''
+          mvn clean package
+          cp webapp/target/*.war .
           echo "🔨 Building Docker image..."
           docker build -t $IMAGE_NAME:$VERSION .
-          echo "🏷️ Tagging image with version and latest..."
           docker tag $IMAGE_NAME:$VERSION $ECR_REGISTRY/$IMAGE_NAME:$VERSION
           docker tag $IMAGE_NAME:$VERSION $ECR_REGISTRY/$IMAGE_NAME:latest
         '''
       }
     }
 
-    stage('Push to ECR') {
+    stage('Push Docker Image to ECR') {
       steps {
         withCredentials([[
           $class: 'AmazonWebServicesCredentialsBinding',
           credentialsId: 'aws-ecr-push'
         ]]) {
-        sh '''
-          docker push $ECR_REGISTRY/$IMAGE_NAME:$VERSION
-          docker push $ECR_REGISTRY/$IMAGE_NAME:latest
-        '''
+          sh '''
+            docker push $ECR_REGISTRY/$IMAGE_NAME:$VERSION
+            docker push $ECR_REGISTRY/$IMAGE_NAME:latest
+          '''
         }
       }
     }
 
-    stage('Ansible Deploy') {
+    stage('Deploy to EKS via Ansible') {
       steps {
         sh '''
-          echo "🚀 SSH to Ansible Server and deploy via ansible-playbook"
-          ssh -o StrictHostKeyChecking=no -i /var/lib/jenkins/.ssh/id_rsa ansadmin@10.0.101.39 '
-            ansible-playbook -i /opt/docker/hosts /opt/docker/regapp.yml
+          echo "🚀 Deploying via Ansible server..."
+          ssh -i $SSH_KEY_PATH -o StrictHostKeyChecking=no $ANSIBLE_USER@$ANSIBLE_SERVER '
+            ansible-playbook -i /opt/docker/hosts /opt/docker/regapp.yml -e app_tag=$VERSION
           '
         '''
       }
@@ -80,12 +76,10 @@ pipeline {
 
   post {
     success {
-      echo "✅  $IMAGE_NAME:$VERSION pushed & deployed."
+      echo "✅ Deployment of $IMAGE_NAME:$VERSION to EKS completed successfully!"
     }
     failure {
-      echo "❌  Deployment failed – check the console log."
+      echo "❌ Deployment failed — Check console output."
     }
   }
 }
-
-
