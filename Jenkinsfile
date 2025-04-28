@@ -43,7 +43,7 @@ pipeline {
           echo "🔨 Building Docker image..."
           docker build -t $IMAGE_NAME:$VERSION .
           docker tag $IMAGE_NAME:$VERSION $ECR_REGISTRY/$IMAGE_NAME:$VERSION
-          docker tag $IMAGE_NAME:$VERSION $ECR_REGISTRY/$IMAGE_NAME:latest
+          #docker tag $IMAGE_NAME:$VERSION $ECR_REGISTRY/$IMAGE_NAME:latest
         '''
       }
     }
@@ -56,7 +56,7 @@ pipeline {
         ]]) {
           sh '''
             docker push $ECR_REGISTRY/$IMAGE_NAME:$VERSION
-            docker push $ECR_REGISTRY/$IMAGE_NAME:latest
+            #docker push $ECR_REGISTRY/$IMAGE_NAME:latest
           '''
         }
       }
