@@ -10,8 +10,8 @@
     aws_account_id: "732583169994"
     aws_region: "us-east-1"
     kubeconfig_path: /home/ansadmin/.kube/config
-    app_deployment_yaml: /home/ansadmin/webapp-deployment.yaml
-    app_service_yaml: /home/ansadmin/webapp-service.yaml
+    app_deployment_yaml: /var/lib/jenkins/workspace/newdeployment/webapp-deployment.yaml
+    app_service_yaml: /var/lib/jenkins/workspace/newdeployment/webapp-service.yaml
 
   tasks:
     - name: Ensure Deployment YAML exists
