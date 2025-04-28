@@ -44,3 +44,6 @@
         state: present
         src: "{{ app_service_yaml }}"
       when: service_file.stat.exists
+    - name: Debug which image tag is being used
+      debug:
+        msg: "Deploying regapp with tag: {{ app_tag }}"
