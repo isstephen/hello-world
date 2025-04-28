@@ -69,11 +69,9 @@ pipeline {
     stage('Ansible Deploy') {
       steps {
         sh '''
-          echo '🚀 SSH into Ansible server and deploy...'
+          echo "🚀 SSH to Ansible Server and deploy via ansible-playbook"
           ssh -o StrictHostKeyChecking=no -i /var/lib/jenkins/.ssh/id_rsa ansadmin@10.0.101.39 '
-            export ANSIBLE_COLLECTIONS_PATHS=/home/ansadmin/.ansible/collections:/usr/share/ansible/collections
-            cd /opt/docker
-            ansible-playbook -i hosts regapp.yml -e app_tag=$VERSION
+            ansible-playbook -i /opt/docker/hosts /opt/docker/regapp.yml
           '
         '''
       }
