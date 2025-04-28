@@ -69,11 +69,8 @@ pipeline {
     stage('Ansible Deploy') {
       steps {
         sh '''
-          export ANSIBLE_COLLECTIONS_PATHS=$ANSIBLE_COLLECTIONS_PATHS
-          ansible-playbook /var/lib/jenkins/workspace/newdeployment/regapp.yml \
-            -e app_tag=$VERSION \
-            -u ansadmin \
-            --private-key=/var/lib/jenkins/.ssh/id_rsa
+          echo "🚀 Deploying to EKS cluster using Ansible..."
+          ansible-playbook -i /var/lib/jenkins/workspace/newdeployment/hosts /var/lib/jenkins/workspace/newdeployment/regapp.yml
         '''
       }
     }
