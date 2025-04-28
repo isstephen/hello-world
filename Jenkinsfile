@@ -69,8 +69,11 @@ pipeline {
     stage('Ansible Deploy') {
       steps {
         sh '''
-          echo "🚀 Deploying to EKS cluster using Ansible..."
-          ansible-playbook -i /var/lib/jenkins/workspace/newdeployment/hosts /var/lib/jenkins/workspace/newdeployment/regapp.yml
+          echo '🚀 SSH into Ansible server and deploy...'
+          ssh -o StrictHostKeyChecking=no -i /var/lib/jenkins/.ssh/id_rsa ansadmin@<ansible-server-private-ip-or-public-ip> '
+            export ANSIBLE_COLLECTIONS_PATHS=/home/ansadmin/.ansible/collections:/usr/share/ansible/collections
+            cd /opt/docker
+            ansible-playbook -i hosts regapp.yml -e app_tag=$VERSION
         '''
       }
     }
