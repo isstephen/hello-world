@@ -12,6 +12,7 @@
     kubeconfig_path: /home/ansadmin/.kube/config
     app_deployment_yaml: /var/lib/jenkins/workspace/newdeployment/webapp-deployment.yaml
     app_service_yaml: /var/lib/jenkins/workspace/newdeployment/webapp-service.yaml
+    full_image_path: "732583169994.dkr.ecr.us-east-1.amazonaws.com/regapp"
 
   tasks:
     - name: Ensure Deployment YAML exists
@@ -27,8 +28,8 @@
     - name: Update Deployment image with new tag
       ansible.builtin.replace:
         path: "{{ app_deployment_yaml }}"
-        regexp: '(image: {{ aws_account_id }}\.dkr\.ecr\.{{ aws_region }}\.amazonaws\.com/{{ app_name }}:)([^\\s]+)'
-        replace: 'image: {{ aws_account_id }}.dkr.ecr.{{ aws_region }}.amazonaws.com/{{ app_name }}:{{ app_tag }}'
+        regexp: '(image:\s*732583169994\.dkr\.ecr\.us-east-1\.amazonaws\.com/regapp:)([^\\s]+)'
+        replace: 'image: {{ full_image_path }}:{{ app_tag }}'
       when: deployment_file.stat.exists
 
     - name: Apply Deployment YAML to Kubernetes
@@ -44,6 +45,7 @@
         state: present
         src: "{{ app_service_yaml }}"
       when: service_file.stat.exists
+
     - name: Debug which image tag is being used
       debug:
-        msg: "Deploying regapp with tag: {{ app_tag }}"
+        msg: "🚀 Deploying regapp image: {{ full_image_path }}:{{ app_tag }}"
