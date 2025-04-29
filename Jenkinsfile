@@ -67,6 +67,7 @@ pipeline {
         sh '''
           echo "🚀 Deploying via Ansible server..."
           ssh -i $SSH_KEY_PATH -o StrictHostKeyChecking=no $ANSIBLE_USER@$ANSIBLE_SERVER '
+            aws eks update-kubeconfig --region us-east-1 --name webapp-cluster &&
             ansible-playbook -i /opt/docker/hosts /opt/docker/regapp.yml -e app_tag=$VERSION
           '
         '''
