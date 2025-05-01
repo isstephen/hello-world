@@ -1,0 +1,6 @@
+# playbooks/test_ping.yml
+---
+- hosts: all
+  gather_facts: no
+  tasks:
+    - ansible.builtin.ping:
