@@ -52,7 +52,7 @@ pipeline {
       steps {
         withCredentials([[
           $class: 'AmazonWebServicesCredentialsBinding',
-          credentialsId: 'aws-ecr-push'
+          credentialsId: 'aws-ecr-eks'
         ]]) {
           sh '''
             docker push $ECR_REGISTRY/$IMAGE_NAME:$VERSION
