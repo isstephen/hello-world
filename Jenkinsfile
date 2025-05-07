@@ -7,7 +7,7 @@ pipeline {
     IMAGE_NAME   = 'regapp'
     ANSIBLE_COLLECTIONS_PATHS = '/var/lib/jenkins/.ansible/collections:/usr/share/ansible/collections'
     ANSIBLE_SERVER = '10.0.101.241'
-    ANSIBLE_USER   = 'ansadmin'
+    ANSIBLE_USER   = 'ec2-user'
     SSH_KEY_PATH   = '/var/lib/jenkins/.ssh/id_rsa'
   }
 
