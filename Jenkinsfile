@@ -79,6 +79,7 @@ pipeline {
                                -e app_tag=${VERSION}
             '
           """
+        }
       }
     }
   }
