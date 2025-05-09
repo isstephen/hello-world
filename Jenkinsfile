@@ -7,8 +7,8 @@ pipeline {
     IMAGE_NAME   = 'regapp'
     ANSIBLE_COLLECTIONS_PATHS = '/var/lib/jenkins/.ansible/collections:/usr/share/ansible/collections'
     ANSIBLE_SERVER = '10.0.101.241'
-    ANSIBLE_USER   = 'ec2-user'
-    SSH_KEY_PATH   = '/var/lib/jenkins/.ssh/id_rsa'
+    ANSIBLE_USER   = 'ansadmin'
+    
   }
 
   parameters {
@@ -62,15 +62,23 @@ pipeline {
       }
     }
 
+    
+    /****************  🔑  SSH + Ansible deploy  ****************************/
     stage('Deploy to EKS via Ansible') {
       steps {
-        sh '''
-          echo "🚀 Deploying via Ansible server..."
-          ssh -i $SSH_KEY_PATH -o StrictHostKeyChecking=no $ANSIBLE_USER@$ANSIBLE_SERVER '
-            aws eks update-kubeconfig --region us-east-1 --name webapp-cluster &&
-            ansible-playbook -i /opt/docker/hosts /opt/docker/regapp.yml -e app_tag=$VERSION
-          '
-        '''
+        sshagent(credentials: ['ansible-ssh-key']) {
+          sh """
+            set -e
+            echo '🚀 Deploying via Ansible server ...'
+
+            ssh -o StrictHostKeyChecking=no ${ANSIBLE_USER}@${ANSIBLE_SERVER} '
+              set -e
+              aws eks update-kubeconfig --region ${AWS_REGION} \
+                                        --name  webapp-cluster &&
+              ansible-playbook -i /opt/docker/hosts /opt/docker/regapp.yml \
+                               -e app_tag=${VERSION}
+            '
+          """
       }
     }
   }
