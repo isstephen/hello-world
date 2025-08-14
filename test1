@@ -1,0 +1,96 @@
+    stage('Install Python deps') {
+      steps {
+        container('python-tools') {
+          sh label: 'Install deps', script: '''
+            python3 -m pip install --upgrade pip
+            python3 -m pip install --index-url "$PIP_INDEX_URL" snowflake-connector-python cryptography
+          '''
+        }
+      }
+    }
+
+    stage('Connect & Print Row Counts') {
+      steps {
+        script {
+          container('python-tools') {
+            // 为了保持“层级结构”风格，仍包一层 dap-build-tools（可去掉，不影响功能）
+            container('dap-build-tools') {
+              withCredentials([sshUserPrivateKey(
+                  credentialsId: "${params.CREDENTIAL_ID}",
+                  keyFileVariable: 'SF_KEY_PATH',
+                  usernameVariable: 'SF_USER'
+              )]) {
+                // 在 python-tools 容器里执行
+                container('python-tools') {
+                  writeFile file: 'count_tables.py', text: """
+import os, sys
+from cryptography.hazmat.primitives import serialization
+import snowflake.connector
+
+HOST      = '${params.HOST}'
+DB        = '${params.DATABASE}'.upper()
+SCHEMA    = '${params.SCHEMA}'.upper()
+ROLE      = '${params.ROLE}'
+WH        = '${params.WAREHOUSE}'
+MODE      = ('${params.COUNT_MODE}' or 'METADATA').upper()
+
+# 读取 Jenkins 注入的私钥并转为 DER(PKCS8)
+with open(os.environ['SF_KEY_PATH'], 'rb') as f:
+    key = serialization.load_pem_private_key(f.read(), password=None)
+pkb = key.private_bytes(
+    encoding=serialization.Encoding.DER,
+    format=serialization.PrivateFormat.PKCS8,
+    encryption_algorithm=serialization.NoEncryption()
+)
+
+conn = snowflake.connector.connect(
+    user=os.environ['SF_USER'],
+    host=HOST,                 # 使用 PrivateLink host
+    private_key=pkb,           # Key Pair 认证
+    role=ROLE, warehouse=WH, database=DB, schema=SCHEMA
+)
+cs = conn.cursor()
+
+# 显式切上下文（更稳妥）
+for q in [f"USE ROLE {ROLE}", f"USE WAREHOUSE {WH}", f"USE DATABASE {DB}", f"USE SCHEMA {DB}.{SCHEMA}"]:
+    cs.execute(q)
+
+total = 0
+print(f"== Row counts in {DB}.{SCHEMA} (mode={MODE}) ==")
+
+if MODE == 'METADATA':
+    sql = f\"\"\"select table_name, coalesce(row_count,0) as rc
+               from {DB}.information_schema.tables
+               where table_schema='{SCHEMA}' and table_type='BASE TABLE'
+               order by table_name\"\"\"
+    cs.execute(sql)
+    for t, rc in cs:
+        rc = int(rc or 0)
+        total += rc
+        print(f"{t}: {rc}")
+else:
+    # EXACT：逐表 COUNT(*)（更准但更慢）
+    cs.execute(f"show tables in {DB}.{SCHEMA}")
+    tables = [r[1] for r in cs]  # 第二列是表名
+    for t in tables:
+        q = f'select count(*) from {DB}.{SCHEMA}."{t}"'
+        cs.execute(q)
+        rc = int(cs.fetchone()[0])
+        total += rc
+        print(f"{t}: {rc}")
+
+print(f"== TOTAL ROWS: {total} ==")
+
+cs.close(); conn.close()
+"""
+                  int rc = sh(returnStatus: true, label: 'Run counting', script: 'python3 count_tables.py')
+                  command_status('Row Counting', rc)
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
