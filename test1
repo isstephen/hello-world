@@ -8,8 +8,8 @@ kind: Pod
 spec:
   containers:
   - name: sf
-    image: 
-    command: ['sh','-c','cat']      # 常驻
+    image: registry.nz.thenational.com/dapds/dap-build-tools:bdh-snowsql-unspecified
+    command: ['sh','-c','cat']
     tty: true
   - name: jnlp
     image: jenkins/inbound-agent:latest-jdk17
@@ -17,36 +17,28 @@ spec:
     }
   }
 
-  /* ===== 参数区：把账号/用户名/仓库/角色/DB/SCHEMA 都做成参数 ===== */
   parameters {
-    string(name: 'SNOW_ACCOUNT', description: 'Snowflake Account Identifier，如 abcd-xy123 或 abcd-xy123.aws-us-east-1')
-    string(name: 'SNOW_USER',    description: 'Snowflake 用户名（与该私钥绑定）')
-    string(name: 'SNOW_WH',      defaultValue: 'COMPUTE_WH',         description: 'Warehouse')
-    string(name: 'SNOW_ROLE',    defaultValue: 'SYSADMIN',           description: 'Role')
-    string(name: 'DB',           defaultValue: 'DB_INVESTMENTS_DEV02', description: 'Database')
-    string(name: 'SCHEMA',       defaultValue: 'S3_RAW_DB_VIEW_STAGE', description: 'Schema')
-    string(name: 'CREDENTIAL_ID',defaultValue: 'snowflake-dev02-key', description: 'Jenkins SSH 私钥凭据 ID')
-    choice(name: 'MODE', choices: ['METADATA','COUNT'],
-           description: 'METADATA: 用 information_schema.row_count（快）；COUNT: 对每张表做 SELECT COUNT(*)（慢）')
+    string(name: 'SNOW_ACCOUNT', defaultValue: 'ab12345.us-east-1.aws')
+    string(name: 'SNOW_USER',    defaultValue: 'svc_myuser')
+    string(name: 'SNOW_ROLE',    defaultValue: 'SYSADMIN')
+    string(name: 'SNOW_WH',      defaultValue: 'COMPUTE_WH')
+    string(name: 'CREDENTIAL_ID',defaultValue: 'snowflake-dev02-key',
+           description: 'Jenkins SSH Private Key（p8）凭据 ID')
   }
 
   stages {
-    stage('Row count via SnowSQL') {
+    stage('Test Snowflake') {
       steps {
         container('sf') {
-          withCredentials([
-            sshUserPrivateKey(
-              credentialsId: params.CREDENTIAL_ID,
-              keyFileVariable: 'PRIVATE_KEY_PATH'    // 只取私钥路径
-              // 不需要 usernameVariable，这里用户名来自参数 SNOW_USER
-            )
-          ]) {
+          withCredentials([sshUserPrivateKey(
+            credentialsId: params.CREDENTIAL_ID,
+            keyFileVariable: 'PRIVATE_KEY_PATH',
+            passphraseVariable: 'PRIVATE_KEY_PASSPHRASE'  // 私钥没口令也没关系
+          )]) {
             sh '''
-set -euo pipefail
-
-# 1) 生成 snowsql 配置（JWT/私钥登录）
-mkdir -p ~/.snowsql
-cat > ~/.snowsql/config <<EOF
+              set -euo pipefail
+              mkdir -p ~/.snowsql
+              cat > ~/.snowsql/config <<EOF
 [connections.dev]
 accountname       = ${SNOW_ACCOUNT}
 username          = ${SNOW_USER}
@@ -54,39 +46,17 @@ rolename          = ${SNOW_ROLE}
 warehousename     = ${SNOW_WH}
 authenticator     = snowflake_jwt
 private_key_path  = ${PRIVATE_KEY_PATH}
-# 可选：设置会话参数，比如时区/时长
-# client_session_keep_alive = true
+client_session_keep_alive = true
 EOF
+              [ -n "${PRIVATE_KEY_PASSPHRASE:-}" ] && \
+                printf "private_key_passphrase = %s\\n" "$PRIVATE_KEY_PASSPHRASE" >> ~/.snowsql/config
 
-echo "== Using connection: ${SNOW_ACCOUNT} as ${SNOW_USER}, role ${SNOW_ROLE}, wh ${SNOW_WH} =="
-
-# 2) 根据模式查询
-if [ "${MODE}" = "METADATA" ]; then
-  # 快：用 information_schema.tables 的 row_count
-  snowsql -c dev -o friendly=false -q "
-    select table_name, coalesce(row_count,0) as rc
-    from \\\"${DB}\\\".information_schema.tables
-    where table_schema='${SCHEMA}' and table_type='BASE TABLE'
-    order by table_name;
-  "
-else
-  # 慢：对每张表跑 COUNT(*)
-  # 先拿表名
-  TABLES=$(snowsql -c dev -o output_format=tsv -q "
-    show tables in \\\"${DB}\\\".\\\"${SCHEMA}\\\";
-  " | awk 'NR>2{print $2}' )  # tsv 第二列是 table_name
-
-  TOTAL=0
-  for T in $TABLES; do
-    RC=$(snowsql -c dev -o output_format=tsv -q "
-      select count(*) from \\\"${DB}\\\".\\\"${SCHEMA}\\\".\\\"${T}\\\";
-    " | tail -n1)
-    printf "%-40s %s\\n" "$T" "$RC"
-    TOTAL=$((TOTAL + RC))
-  done
-  echo "TOTAL ROWS: ${TOTAL}"
-fi
-'''
+              snowsql -c dev -o friendly=false -q "
+                select current_account(), current_region(), current_user(),
+                       current_role(), current_warehouse();
+              "
+              snowsql -c dev -o friendly=false -q "select 1 as ok;"
+            '''
           }
         }
       }
