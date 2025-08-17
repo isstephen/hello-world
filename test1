@@ -9,80 +9,83 @@ spec:
   containers:
   - name: sf
     image: 
-    command: ['sh','-c','cat']   # 保持容器常驻
+    command: ['sh','-c','cat']      # 常驻
     tty: true
-    volumeMounts:
-    - name: ws
-      mountPath: /home/jenkins/agent
   - name: jnlp
     image: jenkins/inbound-agent:latest-jdk17
-  volumes:
-  - name: ws
-    emptyDir: {}
 """
     }
   }
 
+  /* ===== 参数区：把账号/用户名/仓库/角色/DB/SCHEMA 都做成参数 ===== */
   parameters {
-    string(name: 'DB',     defaultValue: 'DB_INVESTMENTS_DEV02',  description: 'Snowflake database')
-    string(name: 'SCHEMA', defaultValue: 'S3_RAW_DB_VIEW_STAGE',  description: 'Snowflake schema')
-    string(name: 'CREDENTIAL_ID', defaultValue: 'snowflake-dev02-key', description: 'Jenkins SSH Username with private key (Snowflake user + PK)')
+    string(name: 'SNOW_ACCOUNT', description: 'Snowflake Account Identifier，如 abcd-xy123 或 abcd-xy123.aws-us-east-1')
+    string(name: 'SNOW_USER',    description: 'Snowflake 用户名（与该私钥绑定）')
+    string(name: 'SNOW_WH',      defaultValue: 'COMPUTE_WH',         description: 'Warehouse')
+    string(name: 'SNOW_ROLE',    defaultValue: 'SYSADMIN',           description: 'Role')
+    string(name: 'DB',           defaultValue: 'DB_INVESTMENTS_DEV02', description: 'Database')
+    string(name: 'SCHEMA',       defaultValue: 'S3_RAW_DB_VIEW_STAGE', description: 'Schema')
+    string(name: 'CREDENTIAL_ID',defaultValue: 'snowflake-dev02-key', description: 'Jenkins SSH 私钥凭据 ID')
+    choice(name: 'MODE', choices: ['METADATA','COUNT'],
+           description: 'METADATA: 用 information_schema.row_count（快）；COUNT: 对每张表做 SELECT COUNT(*)（慢）')
   }
 
   stages {
-    stage('Row count via Python') {
+    stage('Row count via SnowSQL') {
       steps {
         container('sf') {
-          // 使用凭据：账户/仓库/角色 走“Secret Text”三条，用户+私钥走“SSH Username with private key”
           withCredentials([
-            string(credentialsId: 'snowflake-account',   variable: 'SNOW_ACCOUNT'),
-            string(credentialsId: 'snowflake-warehouse', variable: 'SNOW_WH'),
-            string(credentialsId: 'snowflake-role',      variable: 'SNOW_ROLE'),
-            sshUserPrivateKey(credentialsId: params.CREDENTIAL_ID,
-                              keyFileVariable: 'PRIVATE_KEY_PATH',
-                              usernameVariable: 'SNOW_USER')
+            sshUserPrivateKey(
+              credentialsId: params.CREDENTIAL_ID,
+              keyFileVariable: 'PRIVATE_KEY_PATH'    // 只取私钥路径
+              // 不需要 usernameVariable，这里用户名来自参数 SNOW_USER
+            )
           ]) {
             sh '''
-python3 - <<'PY'
-import os
-from cryptography.hazmat.primitives import serialization
-import snowflake.connector
+set -euo pipefail
 
-acct   = os.environ['SNOW_ACCOUNT']
-user   = os.environ['SNOW_USER']
-role   = os.environ['SNOW_ROLE']
-wh     = os.environ['SNOW_WH']
-db     = os.environ.get('DB')
-schema = os.environ.get('SCHEMA')
+# 1) 生成 snowsql 配置（JWT/私钥登录）
+mkdir -p ~/.snowsql
+cat > ~/.snowsql/config <<EOF
+[connections.dev]
+accountname       = ${SNOW_ACCOUNT}
+username          = ${SNOW_USER}
+rolename          = ${SNOW_ROLE}
+warehousename     = ${SNOW_WH}
+authenticator     = snowflake_jwt
+private_key_path  = ${PRIVATE_KEY_PATH}
+# 可选：设置会话参数，比如时区/时长
+# client_session_keep_alive = true
+EOF
 
-# 读取 PKCS#8 私钥 -> DER (connector 需要字节)
-with open(os.environ['PRIVATE_KEY_PATH'], 'rb') as f:
-    pkey = serialization.load_pem_private_key(f.read(), password=None)
-pkb = pkey.private_bytes(
-    encoding=serialization.Encoding.DER,
-    format=serialization.PrivateFormat.PKCS8,
-    encryption_algorithm=serialization.NoEncryption()
-)
+echo "== Using connection: ${SNOW_ACCOUNT} as ${SNOW_USER}, role ${SNOW_ROLE}, wh ${SNOW_WH} =="
 
-conn = snowflake.connector.connect(
-    account=acct, user=user, private_key=pkb,
-    role=role, warehouse=wh, database=db, schema=schema,
-)
-cs = conn.cursor()
+# 2) 根据模式查询
+if [ "${MODE}" = "METADATA" ]; then
+  # 快：用 information_schema.tables 的 row_count
+  snowsql -c dev -o friendly=false -q "
+    select table_name, coalesce(row_count,0) as rc
+    from \\\"${DB}\\\".information_schema.tables
+    where table_schema='${SCHEMA}' and table_type='BASE TABLE'
+    order by table_name;
+  "
+else
+  # 慢：对每张表跑 COUNT(*)
+  # 先拿表名
+  TABLES=$(snowsql -c dev -o output_format=tsv -q "
+    show tables in \\\"${DB}\\\".\\\"${SCHEMA}\\\";
+  " | awk 'NR>2{print $2}' )  # tsv 第二列是 table_name
 
-total = 0
-print(f"== Row counts in {db}.{schema} ==")
-cs.execute(f'SHOW TABLES IN "{db}"."{schema}"')
-tables = [r[1] for r in cs.fetchall()]  # 第一列是 schema，第二列是 table_name
-for t in tables:
-    q = f'SELECT COUNT(*) FROM "{db}"."{schema}"."{t}"'
-    cs.execute(q); c = cs.fetchone()[0]
-    total += c
-    print(f'{t:40s} {c}')
-print(f'TOTAL ROWS: {total}')
-
-cs.close(); conn.close()
-PY
+  TOTAL=0
+  for T in $TABLES; do
+    RC=$(snowsql -c dev -o output_format=tsv -q "
+      select count(*) from \\\"${DB}\\\".\\\"${SCHEMA}\\\".\\\"${T}\\\";
+    " | tail -n1)
+    printf "%-40s %s\\n" "$T" "$RC"
+    TOTAL=$((TOTAL + RC))
+  done
+  echo "TOTAL ROWS: ${TOTAL}"
+fi
 '''
           }
         }
