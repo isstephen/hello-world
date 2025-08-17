@@ -1,1 +1,9 @@
 
+  parameters {
+    string(name: 'DATABASE',      defaultValue: 'DB_INVESTMENTS_DEV02',    description: 'Snowflake database name')
+    string(name: 'SCHEMA',        defaultValue: 'S3_RAW_DB_VIEW_STAGE',    description: 'Snowflake schema name')
+    string(name: 'WAREHOUSE',     defaultValue: 'WH_INVESTMENTS',          description: 'Snowflake warehouse')
+    string(name: 'ROLE',          defaultValue: 'RL_INVESTMENTS_DEV02_CONSUMER', description: 'Snowflake role')
+    string(name: 'ACCOUNT',       defaultValue: '',                        description: 'Snowflake account locator')
+    string(name: 'CREDENTIAL_ID', defaultValue: 'snowflake-dev02-key',     description: 'Jenkins SSH Username with private key')
+  }
