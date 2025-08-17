@@ -1,1 +1,92 @@
+pipeline {
+  agent {
+    kubernetes {
+      defaultContainer 'sf'
+      yaml """
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+  - name: sf
+    image: 
+    command: ['sh','-c','cat']   # 保持容器常驻
+    tty: true
+    volumeMounts:
+    - name: ws
+      mountPath: /home/jenkins/agent
+  - name: jnlp
+    image: jenkins/inbound-agent:latest-jdk17
+  volumes:
+  - name: ws
+    emptyDir: {}
+"""
+    }
+  }
 
+  parameters {
+    string(name: 'DB',     defaultValue: 'DB_INVESTMENTS_DEV02',  description: 'Snowflake database')
+    string(name: 'SCHEMA', defaultValue: 'S3_RAW_DB_VIEW_STAGE',  description: 'Snowflake schema')
+    string(name: 'CREDENTIAL_ID', defaultValue: 'snowflake-dev02-key', description: 'Jenkins SSH Username with private key (Snowflake user + PK)')
+  }
+
+  stages {
+    stage('Row count via Python') {
+      steps {
+        container('sf') {
+          // 使用凭据：账户/仓库/角色 走“Secret Text”三条，用户+私钥走“SSH Username with private key”
+          withCredentials([
+            string(credentialsId: 'snowflake-account',   variable: 'SNOW_ACCOUNT'),
+            string(credentialsId: 'snowflake-warehouse', variable: 'SNOW_WH'),
+            string(credentialsId: 'snowflake-role',      variable: 'SNOW_ROLE'),
+            sshUserPrivateKey(credentialsId: params.CREDENTIAL_ID,
+                              keyFileVariable: 'PRIVATE_KEY_PATH',
+                              usernameVariable: 'SNOW_USER')
+          ]) {
+            sh '''
+python3 - <<'PY'
+import os
+from cryptography.hazmat.primitives import serialization
+import snowflake.connector
+
+acct   = os.environ['SNOW_ACCOUNT']
+user   = os.environ['SNOW_USER']
+role   = os.environ['SNOW_ROLE']
+wh     = os.environ['SNOW_WH']
+db     = os.environ.get('DB')
+schema = os.environ.get('SCHEMA')
+
+# 读取 PKCS#8 私钥 -> DER (connector 需要字节)
+with open(os.environ['PRIVATE_KEY_PATH'], 'rb') as f:
+    pkey = serialization.load_pem_private_key(f.read(), password=None)
+pkb = pkey.private_bytes(
+    encoding=serialization.Encoding.DER,
+    format=serialization.PrivateFormat.PKCS8,
+    encryption_algorithm=serialization.NoEncryption()
+)
+
+conn = snowflake.connector.connect(
+    account=acct, user=user, private_key=pkb,
+    role=role, warehouse=wh, database=db, schema=schema,
+)
+cs = conn.cursor()
+
+total = 0
+print(f"== Row counts in {db}.{schema} ==")
+cs.execute(f'SHOW TABLES IN "{db}"."{schema}"')
+tables = [r[1] for r in cs.fetchall()]  # 第一列是 schema，第二列是 table_name
+for t in tables:
+    q = f'SELECT COUNT(*) FROM "{db}"."{schema}"."{t}"'
+    cs.execute(q); c = cs.fetchone()[0]
+    total += c
+    print(f'{t:40s} {c}')
+print(f'TOTAL ROWS: {total}')
+
+cs.close(); conn.close()
+PY
+'''
+          }
+        }
+      }
+    }
+  }
+}
