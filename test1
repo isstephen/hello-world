@@ -1,64 +1,42 @@
-pipeline {
-  agent {
-    kubernetes {
-      defaultContainer 'sf'
-      yaml """
-apiVersion: v1
-kind: Pod
-spec:
-  containers:
-  - name: sf
-    image: registry.nz.thenational.com/dapds/dap-build-tools:bdh-snowsql-unspecified
-    command: ['sh','-c','cat']
-    tty: true
-  - name: jnlp
-    image: jenkins/inbound-agent:latest-jdk17
-"""
-    }
-  }
+stage('Test Snowflake') {
+  container('dap-build-tools') {
+    withCredentials([
+      // 只绑定私钥文件，不再绑定 passphrase
+      sshUserPrivateKey(credentialsId: params.CREDENTIAL_ID,
+                        keyFileVariable: 'PRIVATE_KEY_PATH')
+    ]) {
+      withEnv([
+        "SNOW_ACCOUNT=${params.SNOW_ACCOUNT}",       // 例如 xy12345.ap-southeast-2.aws 或 …privatelink
+        "SNOW_USER=${params.SNOW_USER}",
+        "SNOW_ROLE=${params.SNOW_ROLE}",
+        "SNOW_WAREHOUSE=${params.SNOW_WAREHOUSE}",
+        "SNOW_DATABASE=${params.SNOW_DATABASE}",
+        "SNOW_SCHEMA=${params.SNOW_SCHEMA}"
+      ]) {
+        sh '''#!/bin/bash
+set -euo pipefail
 
-  parameters {
-    string(name: 'SNOW_ACCOUNT', defaultValue: 'ab12345.us-east-1.aws')
-    string(name: 'SNOW_USER',    defaultValue: 'svc_myuser')
-    string(name: 'SNOW_ROLE',    defaultValue: 'SYSADMIN')
-    string(name: 'SNOW_WH',      defaultValue: 'COMPUTE_WH')
-    string(name: 'CREDENTIAL_ID',defaultValue: 'snowflake-dev02-key',
-           description: 'Jenkins SSH Private Key（p8）凭据 ID')
-  }
+# 1) 确认 snowsql 可用
+command -v snowsql >/dev/null 2>&1 || { echo "snowsql not found in PATH"; exit 127; }
+snowsql -v
 
-  stages {
-    stage('Test Snowflake') {
-      steps {
-        container('sf') {
-          withCredentials([sshUserPrivateKey(
-            credentialsId: params.CREDENTIAL_ID,
-            keyFileVariable: 'PRIVATE_KEY_PATH',
-            passphraseVariable: 'PRIVATE_KEY_PASSPHRASE'  // 私钥没口令也没关系
-          )]) {
-            sh '''
-              set -euo pipefail
-              mkdir -p ~/.snowsql
-              cat > ~/.snowsql/config <<EOF
-[connections.dev]
-accountname       = ${SNOW_ACCOUNT}
-username          = ${SNOW_USER}
-rolename          = ${SNOW_ROLE}
-warehousename     = ${SNOW_WH}
-authenticator     = snowflake_jwt
-private_key_path  = ${PRIVATE_KEY_PATH}
-client_session_keep_alive = true
-EOF
-              [ -n "${PRIVATE_KEY_PASSPHRASE:-}" ] && \
-                printf "private_key_passphrase = %s\\n" "$PRIVATE_KEY_PASSPHRASE" >> ~/.snowsql/config
+# 2) 用 inline 参数直连（不依赖 ~/.snowsql/config）
+snowsql \
+  -a "$SNOW_ACCOUNT" \
+  -u "$SNOW_USER" \
+  -r "$SNOW_ROLE" \
+  -w "$SNOW_WAREHOUSE" \
+  -d "$SNOW_DATABASE" \
+  -s "$SNOW_SCHEMA" \
+  --private-key-path "$PRIVATE_KEY_PATH" \
+  -o friendly=false \
+  -q "select current_account() acct, current_region() region, current_user() usr, current_role() role, current_warehouse() wh;"
 
-              snowsql -c dev -o friendly=false -q "
-                select current_account(), current_region(), current_user(),
-                       current_role(), current_warehouse();
-              "
-              snowsql -c dev -o friendly=false -q "select 1 as ok;"
-            '''
-          }
-        }
+# 3) 再跑个简单查询
+snowsql \
+  -a "$SNOW_ACCOUNT" -u "$SNOW_USER" -r "$SNOW_ROLE" -w "$SNOW_WAREHOUSE" -d "$SNOW_DATABASE" -s "$SNOW_SCHEMA" \
+  --private-key-path "$PRIVATE_KEY_PATH" -o friendly=false -q "select 1 as ok;"
+'''
       }
     }
   }
