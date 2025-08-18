@@ -1,43 +1,48 @@
-stage('Test Snowflake') {
-  container('dap-build-tools') {
-    withCredentials([
-      // 只绑定私钥文件，不再绑定 passphrase
-      sshUserPrivateKey(credentialsId: params.CREDENTIAL_ID,
-                        keyFileVariable: 'PRIVATE_KEY_PATH')
-    ]) {
-      withEnv([
-        "SNOW_ACCOUNT=${params.SNOW_ACCOUNT}",       // 例如 xy12345.ap-southeast-2.aws 或 …privatelink
-        "SNOW_USER=${params.SNOW_USER}",
-        "SNOW_ROLE=${params.SNOW_ROLE}",
-        "SNOW_WAREHOUSE=${params.SNOW_WAREHOUSE}",
-        "SNOW_DATABASE=${params.SNOW_DATABASE}",
-        "SNOW_SCHEMA=${params.SNOW_SCHEMA}"
+stage('Row counts (fast metadata)') {
+  steps {
+    container('dap-build-tools') {
+      withCredentials([
+        sshUserPrivateKey(credentialsId: params.CREDENTIAL_ID, keyFileVariable: 'PRIVATE_KEY_PATH')
       ]) {
-        sh '''#!/bin/bash
+        withEnv([
+          "SNOW_ACCOUNT=${params.SNOW_ACCOUNT}",
+          "SNOW_USER=${params.SNOW_USER}",
+          "SNOW_ROLE=${params.SNOW_ROLE}",
+          "SNOW_WAREHOUSE=${params.SNOW_WH}",
+          "SNOW_DATABASE=${params.SNOW_DB}",         // <- parameterized DB
+          "SNOW_SCHEMA=${params.SNOW_SCHEMA}"        // <- parameterized schema
+        ]) {
+          sh '''#!/bin/bash
 set -euo pipefail
 
-# 1) 确认 snowsql 可用
-command -v snowsql >/dev/null 2>&1 || { echo "snowsql not found in PATH"; exit 127; }
-snowsql -v
+# Build SQL using INFORMATION_SCHEMA (fast, metadata-based)
+SQL="SELECT table_name, row_count
+     FROM ${SNOW_DATABASE}.INFORMATION_SCHEMA.TABLES
+     WHERE table_schema = UPPER('${SNOW_SCHEMA}')
+       AND table_type = 'BASE TABLE'
+       AND table_name LIKE 'F%%'
+     ORDER BY table_name;"
 
-# 2) 用 inline 参数直连（不依赖 ~/.snowsql/config）
+# Console output (pretty table)
 snowsql \
-  -a "$SNOW_ACCOUNT" \
-  -u "$SNOW_USER" \
-  -r "$SNOW_ROLE" \
-  -w "$SNOW_WAREHOUSE" \
-  -d "$SNOW_DATABASE" \
-  -s "$SNOW_SCHEMA" \
+  -a "$SNOW_ACCOUNT" -u "$SNOW_USER" -r "$SNOW_ROLE" \
+  -w "$SNOW_WAREHOUSE" -d "$SNOW_DATABASE" -s "$SNOW_SCHEMA" \
   --private-key-path "$PRIVATE_KEY_PATH" \
   -o friendly=false \
-  -q "select current_account() acct, current_region() region, current_user() usr, current_role() role, current_warehouse() wh;"
+  -q "$SQL"
 
-# 3) 再跑个简单查询
+# CSV export for downstream use
 snowsql \
-  -a "$SNOW_ACCOUNT" -u "$SNOW_USER" -r "$SNOW_ROLE" -w "$SNOW_WAREHOUSE" -d "$SNOW_DATABASE" -s "$SNOW_SCHEMA" \
-  --private-key-path "$PRIVATE_KEY_PATH" -o friendly=false -q "select 1 as ok;"
+  -a "$SNOW_ACCOUNT" -u "$SNOW_USER" -r "$SNOW_ROLE" \
+  -w "$SNOW_WAREHOUSE" -d "$SNOW_DATABASE" -s "$SNOW_SCHEMA" \
+  --private-key-path "$PRIVATE_KEY_PATH" \
+  -o friendly=false -o output_format=csv -o header=true \
+  -q "$SQL" > row_counts.csv
 '''
+        }
       }
     }
+    // archive the CSV
+    archiveArtifacts artifacts: 'row_counts.csv', fingerprint: true, onlyIfSuccessful: true
   }
 }
