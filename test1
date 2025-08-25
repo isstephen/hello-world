@@ -1,1 +1,116 @@
+pipeline {
+  agent {
+    kubernetes {
+      defaultContainer 'inspect'
+      yaml """
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: inspect
+      image: ${IMAGE}
+      imagePullPolicy: Always
+      command: ['sleep']
+      args: ['99d']
+      resources:
+        requests: { cpu: "0.1", memory: "128Mi" }
+        limits:   { cpu: "1",   memory: "512Mi" }
+"""
+    }
+  }
+
+  parameters {
+    string(
+      name: 'IMAGE',
+      defaultValue: '',
+    )
+  }
+
+  options { timestamps() }
+
+  stages {
+    stage('Inspect image') {
+      steps {
+        container('inspect') {
+          sh '''#!/bin/bash
+set -euo pipefail
+
+REPORT="image_inventory.txt"
+: > "$REPORT"
+
+say(){ echo -e "$@" | tee -a "$REPORT"; }
+
+say "=== Image: ${IMAGE:-unknown} ==="
+say "\\n== OS =="
+(cat /etc/os-release 2>/dev/null || true) | tee -a "$REPORT"
+
+say "\\n== Kernel =="
+uname -a | tee -a "$REPORT"
+
+say "\\n== PATH =="
+echo "$PATH" | tee -a "$REPORT"
+
+say "\\n== Package manager & sample list =="
+if command -v dpkg >/dev/null; then
+  say "[Debian/Ubuntu] dpkg present"; dpkg -l | head -n 50 | tee -a "$REPORT"
+elif command -v apk >/dev/null; then
+  say "[Alpine] apk present"; apk info -vv | head -n 50 | tee -a "$REPORT"
+elif command -v rpm >/dev/null; then
+  say "[RHEL/CentOS] rpm present"; rpm -qa | head -n 50 | tee -a "$REPORT"
+else
+  say "No known package manager found"
+fi
+
+check(){ # check <bin> [version args...]
+  local bin="$1"; shift || true
+  if command -v "$bin" >/dev/null 2>&1; then
+    say "\\n>> $bin FOUND"
+    ("$bin" "$@" 2>&1 | head -n 6) | tee -a "$REPORT" || true
+  else
+    say "\\n>> $bin not found"
+  fi
+}
+
+say "\\n== Tools & versions =="
+check bash --version
+check sh --version
+check python --version
+check python3 --version
+check pip --version
+check pip3 --version
+if command -v pip3 >/dev/null; then say "\\n>> pip3 list (top 50)"; pip3 list | head -n 50 | tee -a "$REPORT"; fi
+check node --version
+check npm --version
+check java -version
+check javac -version
+check mvn -v
+check gradle -v
+check aws --version
+check snowsql -v
+check flyway -v
+check psql --version
+check git --version
+check curl --version
+check wget --version
+check jq --version
+check kubectl version --client=true --output=yaml
+check helm version
+check terraform version
+check make --version
+check gcc --version
+
+say "\\nReport written to $REPORT"
+cat "$REPORT"
+'''
+        }
+      }
+    }
+  }
+
+  post {
+    success {
+      archiveArtifacts artifacts: 'image_inventory.txt', fingerprint: true
+    }
+  }
+}
 
