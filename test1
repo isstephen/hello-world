@@ -1,96 +1,168 @@
+guid = UUID.randomUUID().toString()
+
 pipeline {
   agent {
     kubernetes {
-      defaultContainer 'inspect'
-      yaml """
-apiVersion: v1
-kind: Pod
-spec:
-  containers:
-    - name: inspect
-      image: ${IMAGE}
-      imagePullPolicy: Always
-      command: ['sleep']
-      args: ['99d']
-      resources:
-        requests:
-          cpu: "0.1"
-          memory: "128Mi"
-        limits:
-          cpu: "1"
-          memory: "512Mi"
-"""
+      defaultContainer 'aws-build-tools'
+      yaml podTemplate()
+      yamlMergeStrategy merge()
     }
   }
 
+  options { disableResume() }
+
   parameters {
-    string(
-      name: 'IMAGE',
-      defaultValue: '',
-      description: 'image:tag'
-    )
+    choice(name: 'AWS_ENVIRONMENT',       choices: ['nonprod','preprod'], description: 'FRR AWS environment')
+    choice(name: 'TRANSACT_ENVIRONMENT',  choices: ['feature-frr-aws','feature-test-aws'], description: 'transact env used in bucket path')
+    string(name: 'COB_DATE', defaultValue: '', description: 'YYYYMMDD')
+
+    string(name: 'SNOW_ACCOUNT',  defaultValue: 'bnz-dap_prod_aws_privatelink')
+    string(name: 'SNOW_USER',     defaultValue: 'SRV_INVESTMENTS_DEV02_TESTAUTO')
+    string(name: 'SNOW_ROLE',     defaultValue: 'RL_INVESTMENTS_DEV02_CONSUMER')
+    string(name: 'SNOW_WH',       defaultValue: 'WH_INVESTMENTS')
+    string(name: 'SNOW_DB',       defaultValue: 'DB_INVESTMENTS_DEV02')
+    string(name: 'SNOW_SCHEMA',   defaultValue: 'PUBLIC')
+    string(name: 'SNOW_STAGE',    defaultValue: 'INT_LOAD_STAGE')         
+    string(name: 'SNOW_TABLE',    defaultValue: 'S3_FILESIZES')           
+    string(name: 'SNOW_FILEFORMAT', defaultValue: 'FF_S3_FILESIZES')      
+    string(name: 'CREDENTIAL_ID', defaultValue: 'snowflake-dev02-key')    
   }
 
-  options { timestamps() }
-
   stages {
-    stage('Inspect image') {
+
+    stage('Set Env Vars (FRR account & bucket)') {
       steps {
-        container('inspect') {
-          sh '''#!/bin/bash
+        script {
+          def awsRoleName; def awsAccount; def s3BucketPrefix
+          switch (params.AWS_ENVIRONMENT) {
+            case 'nonprod':
+              if (params.TRANSACT_ENVIRONMENT == 'feature-frr-aws') {
+                awsRoleName    = 'frn-templt-nonprod-dev-jenkins'
+                awsAccount     = '752177477252'
+                s3BucketPrefix = 'frr-nonprod'
+              }
+              if (params.TRANSACT_ENVIRONMENT == 'feature-test-aws') {
+                awsRoleName    = 'frn-templt-nonprod-test-jenkins'
+                awsAccount     = '752177477252'
+                s3BucketPrefix = 'frr-nonprod'
+              }
+              break
+            case 'preprod':
+              awsRoleName    = 'frn-templt-preprod-ppte-jenkins'
+              awsAccount     = '85172536859'
+              s3BucketPrefix = 'frr-preprod'
+              break
+          }
+          env.AWS_ROLE_NAME    = awsRoleName
+          env.AWS_ACCOUNT      = awsAccount
+          env.S3_BUCKET_PREFIX = s3BucketPrefix
+        }
+      }
+    }
+
+    stage('Resolve COB_DATE & locate CSV on S3') {
+      steps {
+        container('aws-build-tools') {
+          script {
+            if (!params.COB_DATE?.trim()) {
+              def tz = TimeZone.getTimeZone('Pacific/Auckland')
+              def cal = Calendar.getInstance(tz); cal.add(Calendar.DATE, -1)
+              env.COB_DATE = cal.format('yyyyMMdd')
+              echo "Auto-set COB_DATE (NZT yesterday): ${env.COB_DATE}"
+            } else {
+              env.COB_DATE = params.COB_DATE.trim()
+            }
+            env.BUCKET_NAME = "${env.S3_BUCKET_PREFIX}-${params.TRANSACT_ENVIRONMENT}-extracts-${env.AWS_ACCOUNT}"
+            env.REPORT_KEY  = "reports/${env.COB_DATE}/S3_FILESIZES.csv"
+            echo "S3 file => s3://${env.BUCKET_NAME}/${env.REPORT_KEY}"
+          }
+        }
+      }
+    }
+
+    stage('Download CSV from FRR S3') {
+      steps {
+        container('aws-build-tools') {
+          withBNZVault(secrets: [[ type: 'vaultAWS', accountId: 'aws', role: env.AWS_ROLE_NAME ]]) {
+            sh '''
+              set -euo pipefail
+              command -v aws >/dev/null 2>&1 || { echo "aws cli not found"; exit 127; }
+              rm -f S3_FILESIZES.csv || true
+              aws s3 cp "s3://${BUCKET_NAME}/${REPORT_KEY}" S3_FILESIZES.csv
+              echo "Downloaded CSV lines: $(wc -l < S3_FILESIZES.csv)"
+            '''
+          }
+        }
+      }
+    }
+
+    stage('Snowflake: CREATE objects + PUT + COPY') {
+      steps {
+        container('aws-build-tools') {
+          withCredentials([sshUserPrivateKey(credentialsId: params.CREDENTIAL_ID, keyFileVariable: 'PRIVATE_KEY_PATH')]) {
+            withEnv([
+              "SNOW_ACCOUNT=${params.SNOW_ACCOUNT}",
+              "SNOW_USER=${params.SNOW_USER}",
+              "SNOW_ROLE=${params.SNOW_ROLE}",
+              "SNOW_WAREHOUSE=${params.SNOW_WH}",
+              "SNOW_DATABASE=${params.SNOW_DB}",
+              "SNOW_SCHEMA=${params.SNOW_SCHEMA}",
+              "SNOW_STAGE=${params.SNOW_STAGE}",
+              "SNOW_TABLE=${params.SNOW_TABLE}",
+              "SNOW_FILEFORMAT=${params.SNOW_FILEFORMAT}"
+            ]) {
+              sh '''#!/bin/bash
 set -euo pipefail
 
-REPORT="image_inventory.txt"
-: > "$REPORT"
+command -v snowsql >/dev/null 2>&1 || { echo "snowsql not found in PATH"; exit 127; }
+snowsql -v
 
-say(){ echo -e "$@" | tee -a "$REPORT"; }
+# 1) prepare sql
+cat > prep.sql <<SQL
+CREATE STAGE IF NOT EXISTS ${SNOW_STAGE};
+CREATE FILE FORMAT IF NOT EXISTS ${SNOW_FILEFORMAT}
+  TYPE = CSV
+  SKIP_HEADER = 1
+  FIELD_OPTIONALLY_ENCLOSED_BY = '"';
+CREATE TABLE IF NOT EXISTS ${SNOW_TABLE} (
+  TIME TIMESTAMP_NTZ,
+  SIZE NUMBER,
+  NAME STRING
+);
+SQL
 
-say "=== Image: ${IMAGE:-unknown} ==="
-say "\\n== OS ==";          (cat /etc/os-release 2>/dev/null || true) | tee -a "$REPORT"
-say "\\n== Kernel ==";       uname -a | tee -a "$REPORT"
-say "\\n== PATH ==";         echo "$PATH" | tee -a "$REPORT"
+# 2) execute SQL
+snowsql \
+  -a "$SNOW_ACCOUNT" -u "$SNOW_USER" -r "$SNOW_ROLE" \
+  -w "$SNOW_WAREHOUSE" -d "$SNOW_DATABASE" -s "$SNOW_SCHEMA" \
+  --private-key-path "$PRIVATE_KEY_PATH" \
+  -o friendly=false -o exit_on_error=true -f prep.sql
 
-say "\\n== Package manager & sample list =="
-if command -v dpkg >/dev/null; then
-  say "[Debian/Ubuntu] dpkg present"; dpkg -l | head -n 20 | tee -a "$REPORT"
-elif command -v apk >/dev/null; then
-  say "[Alpine] apk present"; apk info -vv | head -n 20 | tee -a "$REPORT"
-elif command -v rpm >/dev/null; then
-  say "[RHEL/CentOS] rpm present"; rpm -qa | head -n 20 | tee -a "$REPORT"
-else
-  say "No known package manager found"
-fi
+# 3) dedupe same file name
+snowsql \
+  -a "$SNOW_ACCOUNT" -u "$SNOW_USER" -r "$SNOW_ROLE" \
+  -w "$SNOW_WAREHOUSE" -d "$SNOW_DATABASE" -s "$SNOW_SCHEMA" \
+  --private-key-path "$PRIVATE_KEY_PATH" -o friendly=false -o exit_on_error=true \
+  -q "REMOVE @${SNOW_STAGE} pattern='.*S3_FILESIZES.*'"
 
-check(){ # check <bin> [version args...]
-  local bin="$1"; shift || true
-  if command -v "$bin" >/dev/null 2>&1; then
-    say "\\n>> $bin FOUND"
-    ("$bin" "$@" 2>&1 | head -n 5) | tee -a "$REPORT" || true
-  else
-    say "\\n>> $bin not found"
-  fi
-}
+snowsql \
+  -a "$SNOW_ACCOUNT" -u "$SNOW_USER" -r "$SNOW_ROLE" \
+  -w "$SNOW_WAREHOUSE" -d "$SNOW_DATABASE" -s "$SNOW_SCHEMA" \
+  --private-key-path "$PRIVATE_KEY_PATH" -o friendly=false -o exit_on_error=true \
+  -q "PUT file://$PWD/S3_FILESIZES.csv @${SNOW_STAGE} OVERWRITE=TRUE AUTO_COMPRESS=FALSE"
 
-say "\\n== Tools & versions =="
-check bash --version
-check python3 --version
-check pip3 --version
-if command -v pip3 >/dev/null; then
-  say "\\n>> pip3 list (top 20)"
-  pip3 list | head -n 20 | tee -a "$REPORT"
-fi
-check aws --version
-check snowsql -v
-check flyway -v
-check git --version
-check jq --version
-check kubectl version --client=true --output=yaml
-check helm version
-check terraform version
-
-say "\\nReport saved to $REPORT"
-cat "$REPORT"
-'''
+# 4) COPY INTO
+snowsql \
+  -a "$SNOW_ACCOUNT" -u "$SNOW_USER" -r "$SNOW_ROLE" \
+  -w "$SNOW_WAREHOUSE" -d "$SNOW_DATABASE" -s "$SNOW_SCHEMA" \
+  --private-key-path "$PRIVATE_KEY_PATH" -o friendly=false -o exit_on_error=true \
+  -q "COPY INTO ${SNOW_TABLE}
+      FROM @${SNOW_STAGE}/S3_FILESIZES.csv
+      FILE_FORMAT=${SNOW_FILEFORMAT}
+      ON_ERROR=ABORT_STATEMENT"
+              '''
+            }
+          }
         }
       }
     }
@@ -98,7 +170,9 @@ cat "$REPORT"
 
   post {
     success {
-      archiveArtifacts artifacts: 'image_inventory.txt', fingerprint: true
+      echo "Loaded S3_FILESIZES.csv for COB_DATE=${env.COB_DATE} into ${params.SNOW_DB}.${params.SNOW_SCHEMA}.${params.SNOW_TABLE}"
     }
   }
 }
+
+// --- Pod template
