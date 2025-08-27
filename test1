@@ -12,20 +12,20 @@ pipeline {
   options { disableResume() }
 
   parameters {
-    choice(name: 'AWS_ENVIRONMENT',       choices: ['nonprod','preprod'], description: 'FRR AWS environment')
-    choice(name: 'TRANSACT_ENVIRONMENT',  choices: ['feature-frr-aws','feature-test-aws'], description: 'transact env used in bucket path')
+    choice(name: 'AWS_ENVIRONMENT',       choices: ['nonprod','preprod'], description: 'AWS environment')
+    choice(name: 'ENVIRONMENT',  choices: ['feature-xxx-aws','feature-xxx-aws'], description: 'env used in bucket path')
     string(name: 'COB_DATE', defaultValue: '', description: 'YYYYMMDD')
 
-    string(name: 'SNOW_ACCOUNT',  defaultValue: 'bnz-dap_prod_aws_privatelink')
-    string(name: 'SNOW_USER',     defaultValue: 'SRV_INVESTMENTS_DEV02_TESTAUTO')
-    string(name: 'SNOW_ROLE',     defaultValue: 'RL_INVESTMENTS_DEV02_CONSUMER')
-    string(name: 'SNOW_WH',       defaultValue: 'WH_INVESTMENTS')
-    string(name: 'SNOW_DB',       defaultValue: 'DB_INVESTMENTS_DEV02')
+    string(name: 'SNOW_ACCOUNT',  defaultValue: '')
+    string(name: 'SNOW_USER',     defaultValue: '')
+    string(name: 'SNOW_ROLE',     defaultValue: '')
+    string(name: 'SNOW_WH',       defaultValue: '')
+    string(name: 'SNOW_DB',       defaultValue: '')
     string(name: 'SNOW_SCHEMA',   defaultValue: 'PUBLIC')
     string(name: 'SNOW_STAGE',    defaultValue: 'INT_LOAD_STAGE')         
     string(name: 'SNOW_TABLE',    defaultValue: 'S3_FILESIZES')           
     string(name: 'SNOW_FILEFORMAT', defaultValue: 'FF_S3_FILESIZES')      
-    string(name: 'CREDENTIAL_ID', defaultValue: 'snowflake-dev02-key')    
+    string(name: 'CREDENTIAL_ID', defaultValue: '')    
   }
 
   stages {
@@ -36,21 +36,21 @@ pipeline {
           def awsRoleName; def awsAccount; def s3BucketPrefix
           switch (params.AWS_ENVIRONMENT) {
             case 'nonprod':
-              if (params.TRANSACT_ENVIRONMENT == 'feature-frr-aws') {
-                awsRoleName    = 'frn-templt-nonprod-dev-jenkins'
-                awsAccount     = '752177477252'
-                s3BucketPrefix = 'frr-nonprod'
+              if (params.TRANSACT_ENVIRONMENT == 'feature-xxx-aws') {
+                awsRoleName    = ''
+                awsAccount     = ''
+                s3BucketPrefix = ''
               }
-              if (params.TRANSACT_ENVIRONMENT == 'feature-test-aws') {
-                awsRoleName    = 'frn-templt-nonprod-test-jenkins'
-                awsAccount     = '752177477252'
-                s3BucketPrefix = 'frr-nonprod'
+              if (params.TRANSACT_ENVIRONMENT == 'feature-xxxx-aws') {
+                awsRoleName    = ''
+                awsAccount     = ''
+                s3BucketPrefix = ''
               }
               break
             case 'preprod':
-              awsRoleName    = 'frn-templt-preprod-ppte-jenkins'
-              awsAccount     = '85172536859'
-              s3BucketPrefix = 'frr-preprod'
+              awsRoleName    = ''
+              awsAccount     = ''
+              s3BucketPrefix = ''
               break
           }
           env.AWS_ROLE_NAME    = awsRoleName
