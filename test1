@@ -1,178 +1,80 @@
-guid = UUID.randomUUID().toString()
-
-pipeline {
-  agent {
-    kubernetes {
-      defaultContainer 'aws-build-tools'
-      yaml podTemplate()
-      yamlMergeStrategy merge()
-    }
-  }
-
-  options { disableResume() }
-
-  parameters {
-    choice(name: 'AWS_ENVIRONMENT',       choices: ['nonprod','preprod'], description: 'AWS environment')
-    choice(name: 'ENVIRONMENT',  choices: ['feature-xxx-aws','feature-xxx-aws'], description: 'env used in bucket path')
-    string(name: 'COB_DATE', defaultValue: '', description: 'YYYYMMDD')
-
-    string(name: 'SNOW_ACCOUNT',  defaultValue: '')
-    string(name: 'SNOW_USER',     defaultValue: '')
-    string(name: 'SNOW_ROLE',     defaultValue: '')
-    string(name: 'SNOW_WH',       defaultValue: '')
-    string(name: 'SNOW_DB',       defaultValue: '')
-    string(name: 'SNOW_SCHEMA',   defaultValue: 'PUBLIC')
-    string(name: 'SNOW_STAGE',    defaultValue: 'INT_LOAD_STAGE')         
-    string(name: 'SNOW_TABLE',    defaultValue: 'S3_FILESIZES')           
-    string(name: 'SNOW_FILEFORMAT', defaultValue: 'FF_S3_FILESIZES')      
-    string(name: 'CREDENTIAL_ID', defaultValue: '')    
-  }
-
-  stages {
-
-    stage('Set Env Vars (FRR account & bucket)') {
-      steps {
-        script {
-          def awsRoleName; def awsAccount; def s3BucketPrefix
-          switch (params.AWS_ENVIRONMENT) {
-            case 'nonprod':
-              if (params.TRANSACT_ENVIRONMENT == 'feature-xxx-aws') {
-                awsRoleName    = ''
-                awsAccount     = ''
-                s3BucketPrefix = ''
-              }
-              if (params.TRANSACT_ENVIRONMENT == 'feature-xxxx-aws') {
-                awsRoleName    = ''
-                awsAccount     = ''
-                s3BucketPrefix = ''
-              }
-              break
-            case 'preprod':
-              awsRoleName    = ''
-              awsAccount     = ''
-              s3BucketPrefix = ''
-              break
-          }
-          env.AWS_ROLE_NAME    = awsRoleName
-          env.AWS_ACCOUNT      = awsAccount
-          env.S3_BUCKET_PREFIX = s3BucketPrefix
-        }
-      }
-    }
-
-    stage('Resolve COB_DATE & locate CSV on S3') {
-      steps {
-        container('aws-build-tools') {
-          script {
-            if (!params.COB_DATE?.trim()) {
-              def tz = TimeZone.getTimeZone('Pacific/Auckland')
-              def cal = Calendar.getInstance(tz); cal.add(Calendar.DATE, -1)
-              env.COB_DATE = cal.format('yyyyMMdd')
-              echo "Auto-set COB_DATE (NZT yesterday): ${env.COB_DATE}"
-            } else {
-              env.COB_DATE = params.COB_DATE.trim()
-            }
-            env.BUCKET_NAME = "${env.S3_BUCKET_PREFIX}-${params.TRANSACT_ENVIRONMENT}-extracts-${env.AWS_ACCOUNT}"
-            env.REPORT_KEY  = "reports/${env.COB_DATE}/S3_FILESIZES.csv"
-            echo "S3 file => s3://${env.BUCKET_NAME}/${env.REPORT_KEY}"
-          }
-        }
-      }
-    }
-
-    stage('Download CSV from FRR S3') {
-      steps {
-        container('aws-build-tools') {
-          withBNZVault(secrets: [[ type: 'vaultAWS', accountId: 'aws', role: env.AWS_ROLE_NAME ]]) {
-            sh '''
-              set -euo pipefail
-              command -v aws >/dev/null 2>&1 || { echo "aws cli not found"; exit 127; }
-              rm -f S3_FILESIZES.csv || true
-              aws s3 cp "s3://${BUCKET_NAME}/${REPORT_KEY}" S3_FILESIZES.csv
-              echo "Downloaded CSV lines: $(wc -l < S3_FILESIZES.csv)"
-            '''
-          }
-        }
-      }
-    }
-
-    stage('Snowflake: CREATE objects + PUT + COPY') {
-      steps {
-        container('aws-build-tools') {
-          withCredentials([sshUserPrivateKey(credentialsId: params.CREDENTIAL_ID, keyFileVariable: 'PRIVATE_KEY_PATH')]) {
-            withEnv([
-              "SNOW_ACCOUNT=${params.SNOW_ACCOUNT}",
-              "SNOW_USER=${params.SNOW_USER}",
-              "SNOW_ROLE=${params.SNOW_ROLE}",
-              "SNOW_WAREHOUSE=${params.SNOW_WH}",
-              "SNOW_DATABASE=${params.SNOW_DB}",
-              "SNOW_SCHEMA=${params.SNOW_SCHEMA}",
-              "SNOW_STAGE=${params.SNOW_STAGE}",
-              "SNOW_TABLE=${params.SNOW_TABLE}",
-              "SNOW_FILEFORMAT=${params.SNOW_FILEFORMAT}"
-            ]) {
-              sh '''#!/bin/bash
+stage('Snowflake: CREATE objects + PUT + COPY') {
+  steps {
+    container('aws-build-tools') {
+      withCredentials([sshUserPrivateKey(credentialsId: params.CREDENTIAL_ID, keyFileVariable: 'PRIVATE_KEY_PATH')]) {
+        withEnv([
+          "SNOW_ACCOUNT=${params.SNOW_ACCOUNT}",
+          "SNOW_USER=${params.SNOW_USER}",
+          "SNOW_ROLE=${params.SNOW_ROLE}",
+          "SNOW_WAREHOUSE=${params.SNOW_WH}",
+          "SNOW_DATABASE=${params.SNOW_DB}",       // *** 必须填写 DB_INVESTMENTS_DEV02 ***
+          "SNOW_SCHEMA=${params.SNOW_SCHEMA}",     // 例如：EXAMPLE / INVESTMENTS_CORE ...
+          "SNOW_STAGE=${params.SNOW_STAGE}",       // 例如：INT_LOAD_STAGE
+          "SNOW_TABLE=${params.SNOW_TABLE}"        // 例如：S3_FILESIZES
+        ]) {
+          sh '''#!/bin/bash
 set -euo pipefail
 
 command -v snowsql >/dev/null 2>&1 || { echo "snowsql not found in PATH"; exit 127; }
 snowsql -v
 
-# 1) prepare sql
-cat > prep.sql <<SQL
-CREATE STAGE IF NOT EXISTS ${SNOW_STAGE};
-CREATE FILE FORMAT IF NOT EXISTS ${SNOW_FILEFORMAT}
-  TYPE = CSV
-  SKIP_HEADER = 1
-  FIELD_OPTIONALLY_ENCLOSED_BY = '"';
-CREATE TABLE IF NOT EXISTS ${SNOW_TABLE} (
-  TIME TIMESTAMP_NTZ,
-  SIZE NUMBER,
-  NAME STRING
-);
-SQL
+# 为了稳妥，所有对象都用全限定名 "DB"."SCHEMA"."OBJECT"
+FQ_STAGE="\\\"${SNOW_DATABASE}\\\".\\\"${SNOW_SCHEMA}\\\".\\\"${SNOW_STAGE}\\\""
+FQ_TABLE="\\\"${SNOW_DATABASE}\\\".\\\"${SNOW_SCHEMA}\\\".\\\"${SNOW_TABLE}\\\""
 
-# 2) execute SQL
-snowsql \
-  -a "$SNOW_ACCOUNT" -u "$SNOW_USER" -r "$SNOW_ROLE" \
-  -w "$SNOW_WAREHOUSE" -d "$SNOW_DATABASE" -s "$SNOW_SCHEMA" \
-  --private-key-path "$PRIVATE_KEY_PATH" \
-  -o friendly=false -o exit_on_error=true -f prep.sql
-
-# 3) dedupe same file name
+# 1) 只 USE 现有 DB/SCHEMA（不创建 DB）
 snowsql \
   -a "$SNOW_ACCOUNT" -u "$SNOW_USER" -r "$SNOW_ROLE" \
   -w "$SNOW_WAREHOUSE" -d "$SNOW_DATABASE" -s "$SNOW_SCHEMA" \
   --private-key-path "$PRIVATE_KEY_PATH" -o friendly=false -o exit_on_error=true \
-  -q "REMOVE @${SNOW_STAGE} pattern='.*S3_FILESIZES.*'"
+  -q "USE DATABASE \\\"${SNOW_DATABASE}\\\"; USE SCHEMA \\\"${SNOW_SCHEMA}\\\"; 
+      SELECT current_database() AS db, current_schema() AS sch;"
 
+# 2) 目标表（如 schema 没权限创建表，你可以把这一句删掉并预先建表）
 snowsql \
   -a "$SNOW_ACCOUNT" -u "$SNOW_USER" -r "$SNOW_ROLE" \
   -w "$SNOW_WAREHOUSE" -d "$SNOW_DATABASE" -s "$SNOW_SCHEMA" \
   --private-key-path "$PRIVATE_KEY_PATH" -o friendly=false -o exit_on_error=true \
-  -q "PUT file://$PWD/S3_FILESIZES.csv @${SNOW_STAGE} OVERWRITE=TRUE AUTO_COMPRESS=FALSE"
+  -q "CREATE TABLE IF NOT EXISTS ${FQ_TABLE} (
+         TIME TIMESTAMP_NTZ,
+         SIZE NUMBER,
+         NAME STRING
+       );"
 
-# 4) COPY INTO
+# 3) Stage（不创建 DB，只在现有 schema 下创建/复用 stage）
 snowsql \
   -a "$SNOW_ACCOUNT" -u "$SNOW_USER" -r "$SNOW_ROLE" \
   -w "$SNOW_WAREHOUSE" -d "$SNOW_DATABASE" -s "$SNOW_SCHEMA" \
   --private-key-path "$PRIVATE_KEY_PATH" -o friendly=false -o exit_on_error=true \
-  -q "COPY INTO ${SNOW_TABLE}
-      FROM @${SNOW_STAGE}/S3_FILESIZES.csv
-      FILE_FORMAT=${SNOW_FILEFORMAT}
-      ON_ERROR=ABORT_STATEMENT"
-              '''
-            }
-          }
+  -q "CREATE STAGE IF NOT EXISTS ${FQ_STAGE};
+      REMOVE @${FQ_STAGE} pattern='.*S3_FILESIZES.*';"
+
+# 4) PUT CSV 到内部 stage
+snowsql \
+  -a "$SNOW_ACCOUNT" -u "$SNOW_USER" -r "$SNOW_ROLE" \
+  -w "$SNOW_WAREHOUSE" -d "$SNOW_DATABASE" -s "$SNOW_SCHEMA" \
+  --private-key-path "$PRIVATE_KEY_PATH" -o friendly=false -o exit_on_error=true \
+  -q "PUT file://$PWD/S3_FILESIZES.csv @${FQ_STAGE} OVERWRITE=TRUE AUTO_COMPRESS=FALSE;"
+
+# 5) COPY INTO（内联 FILE_FORMAT，避免额外对象依赖）
+snowsql \
+  -a "$SNOW_ACCOUNT" -u "$SNOW_USER" -r "$SNOW_ROLE" \
+  -w "$SNOW_WAREHOUSE" -d "$SNOW_DATABASE" -s "$SNOW_SCHEMA" \
+  --private-key-path "$PRIVATE_KEY_PATH" -o friendly=false -o exit_on_error=true \
+  -q "COPY INTO ${FQ_TABLE}
+      FROM @${FQ_STAGE}/S3_FILESIZES.csv
+      FILE_FORMAT=(TYPE=CSV SKIP_HEADER=1 FIELD_OPTIONALLY_ENCLOSED_BY='\\\"')
+      ON_ERROR=ABORT_STATEMENT;"
+
+# 6) 装载后简单核对
+snowsql \
+  -a "$SNOW_ACCOUNT" -u "$SNOW_USER" -r "$SNOW_ROLE" \
+  -w "$SNOW_WAREHOUSE" -d "$SNOW_DATABASE" -s "$SNOW_SCHEMA" \
+  --private-key-path "$PRIVATE_KEY_PATH" -o friendly=false -o exit_on_error=true \
+  -q "SELECT COUNT(*) AS loaded_rows FROM ${FQ_TABLE};"
+'''
         }
       }
     }
   }
-
-  post {
-    success {
-      echo "Loaded S3_FILESIZES.csv for COB_DATE=${env.COB_DATE} into ${params.SNOW_DB}.${params.SNOW_SCHEMA}.${params.SNOW_TABLE}"
-    }
-  }
 }
-
-// --- Pod template
