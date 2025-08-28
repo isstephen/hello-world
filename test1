@@ -1,1 +1,43 @@
+pipeline {
+  agent any
+
+  stages {
+    stage('Insert into EXAMPLE.ABC') {
+      steps {
+        container('dap-build-tools') {
+          withCredentials([sshUserPrivateKey(credentialsId: params.CREDENTIAL_ID, keyFileVariable: 'PRIVATE_KEY_PATH')]) {
+            withEnv([
+              "SNOW_ACCOUNT=${params.SNOW_ACCOUNT}",
+              "SNOW_USER=${params.SNOW_USER}",
+              "SNOW_ROLE=${params.SNOW_ROLE}",
+              "SNOW_WAREHOUSE=${params.SNOW_WH}",
+              "SNOW_DATABASE=${params.SNOW_DB}",
+              "SNOW_SCHEMA=${params.SNOW_SCHEMA}"
+            ]) {
+              sh '''#!/bin/bash
+                set -euo pipefail
+
+                SQL="INSERT INTO ${SNOW_DATABASE}.${SNOW_SCHEMA}.ABC \
+                (EMPLY_CNTRCT_ID, HR_WRK_TYPE_CDE, IP_ORGUNT_IP_ID, START_DTE, END_DTE) \
+                VALUES (SEQ8(), 'TEST', 3001, CURRENT_TIMESTAMP, NULL);"
+
+                echo "Running SQL: $SQL"
+
+                snowsql \
+                  -a "$SNOW_ACCOUNT" \
+                  -u "$SNOW_USER" \
+                  -r "$SNOW_ROLE" \
+                  -w "$SNOW_WAREHOUSE" \
+                  -d "$SNOW_DATABASE" \
+                  -s "$SNOW_SCHEMA" \
+                  --private-key-path "$PRIVATE_KEY_PATH" \
+                  -q "$SQL"
+              '''
+            }
+          }
+        }
+      }
+    }
+  }
+}
 
