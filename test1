@@ -11,17 +11,17 @@ stage('Snowflake: PUT + COPY (user stage, dated file)') {
           "SNOW_SCHEMA=${params.SNOW_SCHEMA}",
           "SNOW_TABLE=${params.SNOW_TABLE}",
           "CODE_DATE=${params.CODE_DATE ?: ''}",
-          "FORCE_COPY=${params.FORCE_COPY ?: 'TRUE'}",
-          "CSV_PREFIX=${params.CSV_PREFIX ?: 'S3_FILESIZES'}"
+          "CSV_PREFIX=${params.CSV_PREFIX ?: 'S3_FILESIZES'}",
+          "FORCE_COPY=${params.FORCE_COPY ?: 'TRUE'}"
         ]) {
           sh '''#!/bin/bash
 set -euo pipefail
 
-if [[ -n "${CODE_DATE}" ]]; then
-  CSV_PATH="${CSV_PREFIX}_${CODE_DATE}.csv"
-else
-  CSV_PATH="${CSV_PREFIX}.csv"
-fi
+: "${CODE_DATE:=}"
+: "${CSV_PREFIX:=S3_FILESIZES}"
+: "${FORCE_COPY:=TRUE}"
+
+CSV_PATH="${CSV_PREFIX}${CODE_DATE:+_${CODE_DATE}}.csv"
 
 command -v snowsql >/dev/null 2>&1 || { echo "snowsql not found in PATH"; exit 127; }
 [[ -f "$CSV_PATH" ]] || { echo "CSV file not found: $CSV_PATH"; ls -la; exit 66; }
@@ -33,7 +33,7 @@ USE WAREHOUSE ${SNOW_WAREHOUSE};
 USE DATABASE ${SNOW_DATABASE};
 USE SCHEMA ${SNOW_SCHEMA};
 
-SELECT CURRENT_ROLE() AS role, CURRENT_WAREHOUSE() AS wh, CURRENT_DATABASE() AS db, CURRENT_SCHEMA() AS sch;
+SELECT CURRENT_ROLE() role, CURRENT_WAREHOUSE() wh, CURRENT_DATABASE() db, CURRENT_SCHEMA() sch;
 
 REMOVE @~ pattern='^${FILE_BASENAME//./\\\\.}$';
 
@@ -41,12 +41,11 @@ PUT file://$PWD/${CSV_PATH} @~ OVERWRITE=TRUE AUTO_COMPRESS=FALSE;
 
 COPY INTO ${SNOW_TABLE}
   FROM @~/${FILE_BASENAME}
-  FILE_FORMAT=(TYPE=CSV SKIP_HEADER=1 FIELD_OPTIONALLY_ENCLOSED_BY='"')
+  FILE_FORMAT=(TYPE=CSV SKIP_HEADER=1 FIELD_OPTIONALLY_ENCLOSED_BY='\"')
   ON_ERROR=ABORT_STATEMENT
   FORCE=${FORCE_COPY};
 
-SELECT *
-FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+SELECT * FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
 
 SELECT * FROM ${SNOW_TABLE} ORDER BY 1 DESC LIMIT 5;
 SQL
@@ -64,5 +63,9 @@ echo "Loaded ${FILE_BASENAME} (CODE_DATE=${CODE_DATE:-N/A}) into ${SNOW_DATABASE
       }
     }
   }
+  post {
+    success {
+      echo "Loaded ${env.CSV_PREFIX}${env.CODE_DATE ? '_' + env.CODE_DATE : ''}.csv into ${params.SNOW_DB}.${params.SNOW_SCHEMA}.${params.SNOW_TABLE}"
+    }
+  }
 }
-
