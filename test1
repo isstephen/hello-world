@@ -22,12 +22,17 @@ set -euo pipefail
 : "${FORCE_COPY:=TRUE}"
 
 CSV_PATH="${CSV_PREFIX}${CODE_DATE:+_${CODE_DATE}}.csv"
-
-command -v snowsql >/dev/null 2>&1 || { echo "snowsql not found in PATH"; exit 127; }
-[[ -f "$CSV_PATH" ]] || { echo "CSV file not found: $CSV_PATH"; ls -la; exit 66; }
 FILE_BASENAME="$(basename "$CSV_PATH")"
 
-cat > copy.sql <<SQL
+command -v snowsql >/dev/null 2>&1 || { echo "snowsql not found in PATH"; exit 127; }
+if command -v dos2unix >/dev/null 2>&1; then
+  dos2unix -q "$CSV_PATH" || true
+fi
+[[ -f "$CSV_PATH" ]] || { echo "CSV file not found: $CSV_PATH"; ls -la; exit 66; }
+
+echo "Using CSV_PATH=$CSV_PATH ; FILE_BASENAME=$FILE_BASENAME ; FORCE_COPY=$FORCE_COPY"
+
+cat > copy.sql <<__SQL__
 USE ROLE ${SNOW_ROLE};
 USE WAREHOUSE ${SNOW_WAREHOUSE};
 USE DATABASE ${SNOW_DATABASE};
@@ -48,7 +53,11 @@ COPY INTO ${SNOW_TABLE}
 SELECT * FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
 
 SELECT * FROM ${SNOW_TABLE} ORDER BY 1 DESC LIMIT 5;
-SQL
+__SQL__
+
+echo "===== copy.sql (head) ====="
+sed -n '1,40p' copy.sql || true
+echo "===== end ====="
 
 snowsql \
   -a "$SNOW_ACCOUNT" -u "$SNOW_USER" -r "$SNOW_ROLE" \
