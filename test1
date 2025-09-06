@@ -1,4 +1,4 @@
-stage('Snowflake: PUT + COPY (user stage, dated file)') {
+stage('Snowflake: PUT + COPY (FQN + preview + result)') {
   steps {
     container('dap-build-tools') {
       withCredentials([sshUserPrivateKey(credentialsId: params.CREDENTIAL_ID, keyFileVariable: 'PRIVATE_KEY_PATH')]) {
@@ -17,46 +17,58 @@ stage('Snowflake: PUT + COPY (user stage, dated file)') {
           sh '''#!/bin/bash
 set -euo pipefail
 
+to_lower(){ printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
 : "${CODE_DATE:=}"
 : "${CSV_PREFIX:=S3_FILESIZES}"
 : "${FORCE_COPY:=TRUE}"
 
+if [[ -z "$CSV_PREFIX" || "$(to_lower "$CSV_PREFIX")" == "null" || "$(to_lower "$CSV_PREFIX")" == "none" ]]; then
+  CSV_PREFIX="S3_FILESIZES"
+fi
+if [[ -z "$FORCE_COPY" || "$(to_lower "$FORCE_COPY")" == "null" ]]; then
+  FORCE_COPY="TRUE"
+fi
+
 CSV_PATH="${CSV_PREFIX}${CODE_DATE:+_${CODE_DATE}}.csv"
 FILE_BASENAME="$(basename "$CSV_PATH")"
+ESCAPED_BASENAME="${FILE_BASENAME//./\\\\.}"
+TARGET_FQN="${SNOW_DATABASE}.${SNOW_SCHEMA}.${SNOW_TABLE}"
 
 command -v snowsql >/dev/null 2>&1 || { echo "snowsql not found in PATH"; exit 127; }
-if command -v dos2unix >/dev/null 2>&1; then
-  dos2unix -q "$CSV_PATH" || true
-fi
 [[ -f "$CSV_PATH" ]] || { echo "CSV file not found: $CSV_PATH"; ls -la; exit 66; }
 
-echo "Using CSV_PATH=$CSV_PATH ; FILE_BASENAME=$FILE_BASENAME ; FORCE_COPY=$FORCE_COPY"
+echo "Using CSV_PATH=$CSV_PATH ; FILE_BASENAME=$FILE_BASENAME ; TARGET_FQN=$TARGET_FQN ; FORCE_COPY=$FORCE_COPY"
 
-cat > copy.sql <<__SQL__
-USE ROLE ${SNOW_ROLE};
-USE WAREHOUSE ${SNOW_WAREHOUSE};
-USE DATABASE ${SNOW_DATABASE};
-USE SCHEMA ${SNOW_SCHEMA};
+{
+  printf 'USE ROLE %s;\\n'        "$SNOW_ROLE"
+  printf 'USE WAREHOUSE %s;\\n'   "$SNOW_WAREHOUSE"
+  printf 'USE DATABASE %s;\\n'    "$SNOW_DATABASE"
+  printf 'USE SCHEMA %s;\\n\\n'   "$SNOW_SCHEMA"
 
-SELECT CURRENT_ROLE() role, CURRENT_WAREHOUSE() wh, CURRENT_DATABASE() db, CURRENT_SCHEMA() sch;
+  printf 'SELECT CURRENT_ROLE() role, CURRENT_WAREHOUSE() wh, CURRENT_DATABASE() db, CURRENT_SCHEMA() sch;\\n\\n'
 
-REMOVE @~ pattern='^${FILE_BASENAME//./\\\\.}$';
+  printf "REMOVE @~ pattern='^%s$';\\n" "$ESCAPED_BASENAME"
+  printf "PUT file://%s @~ OVERWRITE=TRUE AUTO_COMPRESS=FALSE;\\n" "$PWD/$CSV_PATH"
+  printf "LIST @~ pattern='^%s$';\\n\\n" "$ESCAPED_BASENAME"
 
-PUT file://$PWD/${CSV_PATH} @~ OVERWRITE=TRUE AUTO_COMPRESS=FALSE;
+  printf "SELECT metadata\$filename AS fname, t.\$1 AS c1, t.\$2 AS c2, t.\$3 AS c3\\n"
+  printf "FROM @~/%s (FILE_FORMAT=(TYPE=CSV SKIP_HEADER=1 FIELD_OPTIONALLY_ENCLOSED_BY='\"')) t\\n" "$FILE_BASENAME"
+  printf "LIMIT 3;\\n\\n"
 
-COPY INTO ${SNOW_TABLE}
-  FROM @~/${FILE_BASENAME}
-  FILE_FORMAT=(TYPE=CSV SKIP_HEADER=1 FIELD_OPTIONALLY_ENCLOSED_BY='\"')
-  ON_ERROR=ABORT_STATEMENT
-  FORCE=${FORCE_COPY};
+  printf 'COPY INTO %s\\n' "$TARGET_FQN"
+  printf '  FROM @~/%s\\n' "$FILE_BASENAME"
+  printf "  FILE_FORMAT=(TYPE=CSV SKIP_HEADER=1 FIELD_OPTIONALLY_ENCLOSED_BY='\"')\\n"
+  printf '  ON_ERROR=ABORT_STATEMENT\\n'
+  printf '  FORCE=%s;\\n\\n' "$FORCE_COPY"
 
-SELECT * FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+  printf 'SELECT rows_loaded, errors_seen, first_error_message, first_error_line FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));\\n\\n'
 
-SELECT * FROM ${SNOW_TABLE} ORDER BY 1 DESC LIMIT 5;
-__SQL__
+  printf 'SELECT * FROM %s ORDER BY 1 DESC LIMIT 5;\\n' "$TARGET_FQN"
+} > copy.sql
 
 echo "===== copy.sql (head) ====="
-sed -n '1,40p' copy.sql || true
+sed -n '1,120p' copy.sql || true
 echo "===== end ====="
 
 snowsql \
@@ -65,16 +77,9 @@ snowsql \
   --private-key-path "$PRIVATE_KEY_PATH" \
   -o friendly=false -o exit_on_error=true \
   -f copy.sql
-
-echo "Loaded ${FILE_BASENAME} (CODE_DATE=${CODE_DATE:-N/A}) into ${SNOW_DATABASE}.${SNOW_SCHEMA}.${SNOW_TABLE} with FORCE=${FORCE_COPY}"
 '''
         }
       }
-    }
-  }
-  post {
-    success {
-      echo "Loaded ${env.CSV_PREFIX}${env.CODE_DATE ? '_' + env.CODE_DATE : ''}.csv into ${params.SNOW_DB}.${params.SNOW_SCHEMA}.${params.SNOW_TABLE}"
     }
   }
 }
