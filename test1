@@ -14,55 +14,53 @@ stage('Snowflake: PUT + COPY (FQN + result only)') {
           "CSV_PREFIX=${params.CSV_PREFIX ?: 'S3_FILESIZES'}",
           "FORCE_COPY=${params.FORCE_COPY ?: 'TRUE'}"
         ]) {
-          sh '''#!/bin/bash
-set -euo pipefail
+          sh '''set -eu
 
 to_lower(){ printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 : "${CODE_DATE:=}"
 : "${CSV_PREFIX:=S3_FILESIZES}"
 : "${FORCE_COPY:=TRUE}"
-
-if [[ -z "$CSV_PREFIX" || "$(to_lower "$CSV_PREFIX")" == "null" || "$(to_lower "$CSV_PREFIX")" == "none" ]]; then
+if [ -z "$CSV_PREFIX" ] || [ "$(to_lower "$CSV_PREFIX")" = "null" ] || [ "$(to_lower "$CSV_PREFIX")" = "none" ]; then
   CSV_PREFIX="S3_FILESIZES"
 fi
-if [[ -z "$FORCE_COPY" || "$(to_lower "$FORCE_COPY")" == "null" ]]; then
+if [ -z "$FORCE_COPY" ] || [ "$(to_lower "$FORCE_COPY")" = "null" ]; then
   FORCE_COPY="TRUE"
 fi
 
 CSV_PATH="${CSV_PREFIX}${CODE_DATE:+_${CODE_DATE}}.csv"
 FILE_BASENAME="$(basename "$CSV_PATH")"
-ESCAPED_BASENAME="${FILE_BASENAME//./\\\\.}"
+
+ESCAPED_BASENAME="$(printf '%s' "$FILE_BASENAME" | sed 's/[.[\\^$*]/\\\\&/g')"
 TARGET_FQN="${SNOW_DATABASE}.${SNOW_SCHEMA}.${SNOW_TABLE}"
 
-command -v snowsql >/dev/null 2>&1 || { echo "snowsql not found in PATH"; exit 127; }
-[[ -f "$CSV_PATH" ]] || { echo "CSV file not found: $CSV_PATH"; ls -la; exit 66; }
+command -v snowsql >/dev/null 2>&1 || { echo "snowsql not found"; exit 127; }
+[ -f "$CSV_PATH" ] || { echo "CSV not found: $CSV_PATH"; ls -la; exit 66; }
 
 echo "Using CSV_PATH=$CSV_PATH ; FILE_BASENAME=$FILE_BASENAME ; TARGET_FQN=$TARGET_FQN ; FORCE_COPY=$FORCE_COPY"
 
-{
-  printf 'USE ROLE %s;\\n'        "$SNOW_ROLE"
-  printf 'USE WAREHOUSE %s;\\n'   "$SNOW_WAREHOUSE"
-  printf 'USE DATABASE %s;\\n'    "$SNOW_DATABASE"
-  printf 'USE SCHEMA %s;\\n\\n'   "$SNOW_SCHEMA"
+cat > copy.sql <<EOF
+USE ROLE ${SNOW_ROLE};
+USE WAREHOUSE ${SNOW_WAREHOUSE};
+USE DATABASE ${SNOW_DATABASE};
+USE SCHEMA ${SNOW_SCHEMA};
 
-  printf 'SELECT CURRENT_ROLE() role, CURRENT_WAREHOUSE() wh, CURRENT_DATABASE() db, CURRENT_SCHEMA() sch;\\n\\n'
+SELECT CURRENT_ROLE() role, CURRENT_WAREHOUSE() wh, CURRENT_DATABASE() db, CURRENT_SCHEMA() sch;
 
+REMOVE @~ pattern='^${ESCAPED_BASENAME}$';
+PUT file://$PWD/${CSV_PATH} @~ OVERWRITE=TRUE AUTO_COMPRESS=FALSE;
+LIST @~ pattern='^${ESCAPED_BASENAME}$';
 
-  printf "REMOVE @~ pattern='^%s$';\\n" "$ESCAPED_BASENAME"
-  printf "PUT file://%s @~ OVERWRITE=TRUE AUTO_COMPRESS=FALSE;\\n" "$PWD/$CSV_PATH"
-  printf "LIST @~ pattern='^%s$';\\n\\n" "$ESCAPED_BASENAME"
+COPY INTO ${TARGET_FQN}
+  FROM @~/${FILE_BASENAME}
+  FILE_FORMAT=(TYPE=CSV SKIP_HEADER=1 FIELD_OPTIONALLY_ENCLOSED_BY=0x22)
+  ON_ERROR=ABORT_STATEMENT
+  FORCE=${FORCE_COPY};
 
+SELECT rows_loaded, errors_seen, first_error_message, first_error_line
+FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
 
-  printf 'COPY INTO %s\\n' "$TARGET_FQN"
-  printf '  FROM @~/%s\\n' "$FILE_BASENAME"
-  printf "  FILE_FORMAT=(TYPE=CSV, SKIP_HEADER=1, FIELD_OPTIONALLY_ENCLOSED_BY='\"')\\n"
-  printf '  ON_ERROR=ABORT_STATEMENT\\n'
-  printf '  FORCE=%s;\\n\\n' "$FORCE_COPY"
-
-  printf 'SELECT rows_loaded, errors_seen, first_error_message, first_error_line FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));\\n\\n'
-
-  printf 'SELECT * FROM %s ORDER BY 1 DESC LIMIT 5;\\n' "$TARGET_FQN"
-} > copy.sql
+SELECT * FROM ${TARGET_FQN} ORDER BY 1 DESC LIMIT 5;
+EOF
 
 echo "===== copy.sql (head) ====="
 sed -n '1,200p' copy.sql || true
