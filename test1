@@ -52,7 +52,7 @@ echo "Using CSV_PATH=$CSV_PATH ; FILE_BASENAME=$FILE_BASENAME ; TARGET_FQN=$TARG
   printf "PUT file://%s @~ OVERWRITE=TRUE AUTO_COMPRESS=FALSE;\\n" "$PWD/$CSV_PATH"
   printf "LIST @~ pattern='^%s$';\\n\\n" "$ESCAPED_BASENAME"
 
-  printf "SELECT metadata\$filename AS fname, t.\$1 AS c1, t.\$2 AS c2, t.\$3 AS c3\\n"
+  printf "SELECT metadata\\$filename AS fname, t.\\$1 AS c1, t.\\$2 AS c2, t.\\$3 AS c3\\n"
   printf "FROM @~/%s (FILE_FORMAT=(TYPE=CSV SKIP_HEADER=1 FIELD_OPTIONALLY_ENCLOSED_BY='\"')) t\\n" "$FILE_BASENAME"
   printf "LIMIT 3;\\n\\n"
 
