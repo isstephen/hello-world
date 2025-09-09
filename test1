@@ -1,42 +1,129 @@
-stage('Snowflake: PUT + COPY (FQN + result only)') {
-  steps {
-    container('dap-build-tools') {
-      withCredentials([sshUserPrivateKey(credentialsId: params.CREDENTIAL_ID, keyFileVariable: 'PRIVATE_KEY_PATH')]) {
-        withEnv([
-          "SNOW_ACCOUNT=${params.SNOW_ACCOUNT}",
-          "SNOW_USER=${params.SNOW_USER}",
-          "SNOW_ROLE=${params.SNOW_ROLE}",
-          "SNOW_WAREHOUSE=${params.SNOW_WH}",
-          "SNOW_DATABASE=${params.SNOW_DB}",
-          "SNOW_SCHEMA=${params.SNOW_SCHEMA}",
-          "SNOW_TABLE=${params.SNOW_TABLE}",
-          "CODE_DATE=${params.CODE_DATE ?: ''}",
-          "CSV_PREFIX=${params.CSV_PREFIX ?: 'S3_FILESIZES'}",
-          "FORCE_COPY=${params.FORCE_COPY ?: 'TRUE'}"
-        ]) {
-          sh '''set -eu
+def guid = UUID.randomUUID().toString()
 
-to_lower(){ printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
-: "${CODE_DATE:=}"
-: "${CSV_PREFIX:=S3_FILESIZES}"
+pipeline {
+  agent {
+    kubernetes {
+      defaultContainer 'aws-build-tools'
+      yaml podTemplate()
+      yamlMergeStrategy merge()
+    }
+  }
+  options { disableResume() }
+
+  parameters {
+    choice(name: 'AWS_ENVIRONMENT', choices: ['nonprod', 'preprod'], description: 'FRR 环境')
+    choice(name: 'TRANSACT_ENVIRONMENT', choices: ['feature-frr-aws', 'feature-test-aws'], description: 'Transact 环境标识')
+    string(name: 'COB_DATE', defaultValue: '', description: 'yyyyMMdd；留空=自动取NZT昨日用于S3路径')
+    // —— 文件与表 —— //
+    string(name: 'CSV_BASENAME', defaultValue: 'BNK_HASH_TOTAL.csv', description: 'reports/<COB_DATE>/ 下的文件名')
+    string(name: 'SNOW_ACCOUNT',  defaultValue: '',   description: 'Snowflake account 名（xxx-xxxx 或主机别名）')
+    string(name: 'SNOW_USER',     defaultValue: '',   description: 'Snowflake 用户')
+    string(name: 'SNOW_ROLE',     defaultValue: '',   description: 'Snowflake 角色')
+    string(name: 'SNOW_WH',       defaultValue: '',   description: 'Warehouse')
+    string(name: 'SNOW_DB',       defaultValue: 'DB_investments_dev02', description: '数据库')
+    string(name: 'SNOW_SCHEMA',   defaultValue: '',   description: 'Schema')
+    string(name: 'SNOW_TABLE',    defaultValue: 'BNK_HASH_TOTAL', description: '目标表名')
+    string(name: 'FORCE_COPY',    defaultValue: 'TRUE', description: 'COPY INTO FORCE=TRUE/FALSE')
+    string(name: 'CREDENTIAL_ID', defaultValue: 'your-ssh-key-id', description: '含 snowsql 私钥的 Jenkins credentialsId')
+  }
+
+  stages {
+
+    stage('Set Env Vars (FRR account & bucket)') {
+      steps {
+        script {
+          def awsRoleName; def awsAccount; def s3BucketPrefix
+          switch(params.AWS_ENVIRONMENT) {
+            case 'nonprod':
+              if (params.TRANSACT_ENVIRONMENT == 'feature-frr-aws') {
+                awsRoleName   = 'frr-templt-nonprod-dev-jenkins'
+                awsAccount    = '752177477252'
+                s3BucketPrefix= 'frr-nonprod'
+                break
+              }
+              if (params.TRANSACT_ENVIRONMENT == 'feature-test-aws') {
+                awsRoleName   = 'frr-templt-nonprod-test-jenkins'
+                awsAccount    = '752177477252'
+                s3BucketPrefix= 'frr-nonprod'
+                break
+              }
+            case 'preprod':
+              awsRoleName   = 'frr-templt-preprod-ppte-jenkins'
+              awsAccount    = '851725356859'
+              s3BucketPrefix= 'frr-preprod'
+              break
+          }
+          env.AWS_ROLE_NAME   = awsRoleName
+          env.AWS_ACCOUNT     = awsAccount
+          env.S3_BUCKET_PREFIX= s3BucketPrefix
+        }
+      }
+    }
+
+    stage('Resolve COB DATE & locate CSV on S3') {
+      steps {
+        container('aws-build-tools') {
+          script {
+            if (!params.COB_DATE?.trim()) {
+              def tz = TimeZone.getTimeZone('Pacific/Auckland')
+              def cal = Calendar.getInstance(tz); cal.add(Calendar.DATE, -1)
+              env.COB_DATE = cal.format('yyyyMMdd')
+              echo "Auto-set COB_DATE (NZT yesterday): ${env.COB_DATE}"
+            } else {
+              env.COB_DATE = params.COB_DATE.trim()
+            }
+            env.BUCKET_NAME = "${env.S3_BUCKET_PREFIX}-${params.TRANSACT_ENVIRONMENT}-extracts-${env.AWS_ACCOUNT}"
+            env.REPORT_KEY  = "reports/${env.COB_DATE}/${params.CSV_BASENAME}"
+            echo "S3 file => s3://${env.BUCKET_NAME}/${env.REPORT_KEY}"
+          }
+        }
+      }
+    }
+
+    stage('Download CSV from FRR S3') {
+      steps {
+        container('aws-build-tools') {
+          withBNZvault(secrets: [[ type: 'vaultAWS', accountId: 'aws', role: env.AWS_ROLE_NAME ]]) {
+            sh '''
+              set -euo pipefail
+              command -v aws >/dev/null 2>&1 || { echo "aws cli not found"; exit 127; }
+              rm -f "${CSV_BASENAME}" || true
+              aws s3 cp "s3://${BUCKET_NAME}/${REPORT_KEY}" "${CSV_BASENAME}"
+              echo "downloaded CSV lines: $(wc -l < "${CSV_BASENAME}")"
+            '''
+          }
+        }
+      }
+    }
+
+    stage('snowflake: PUT + COPY BNK_HASH_TOTAL') {
+      steps {
+        container('dap-build-tools') {
+          withCredentials([sshUserPrivateKey(credentialsId: params.CREDENTIAL_ID, keyFileVariable: 'PRIVATE_KEY_PATH')]) {
+            withEnv([
+              "SNOW_ACCOUNT=${params.SNOW_ACCOUNT}",
+              "SNOW_USER=${params.SNOW_USER}",
+              "SNOW_ROLE=${params.SNOW_ROLE}",
+              "SNOW_WAREHOUSE=${params.SNOW_WH}",
+              "SNOW_DATABASE=${params.SNOW_DB}",
+              "SNOW_SCHEMA=${params.SNOW_SCHEMA}",
+              "SNOW_TABLE=${params.SNOW_TABLE}",
+              "CSV_FILE=${params.CSV_BASENAME}",
+              "FORCE_COPY=${params.FORCE_COPY}"
+            ]) {
+              sh '''set -euo pipefail
+
+to_lower(){ printf "%s" "$1" | tr '[:upper:]' '[:lower:]'; }
+
 : "${FORCE_COPY:=TRUE}"
-if [ -z "$CSV_PREFIX" ] || [ "$(to_lower "$CSV_PREFIX")" = "null" ] || [ "$(to_lower "$CSV_PREFIX")" = "none" ]; then
-  CSV_PREFIX="S3_FILESIZES"
-fi
-if [ -z "$FORCE_COPY" ] || [ "$(to_lower "$FORCE_COPY")" = "null" ]; then
-  FORCE_COPY="TRUE"
-fi
 
-CSV_PATH="${CSV_PREFIX}${CODE_DATE:+_${CODE_DATE}}.csv"
-FILE_BASENAME="$(basename "$CSV_PATH")"
-
-ESCAPED_BASENAME="$(printf '%s' "$FILE_BASENAME" | sed 's/[.[\\^$*]/\\\\&/g')"
+FILE_BASENAME="${CSV_FILE}"
 TARGET_FQN="${SNOW_DATABASE}.${SNOW_SCHEMA}.${SNOW_TABLE}"
 
 command -v snowsql >/dev/null 2>&1 || { echo "snowsql not found"; exit 127; }
-[ -f "$CSV_PATH" ] || { echo "CSV not found: $CSV_PATH"; ls -la; exit 66; }
+[ -f "$FILE_BASENAME" ] || { echo "csv not found: $FILE_BASENAME"; ls -la; exit 66; }
 
-echo "Using CSV_PATH=$CSV_PATH ; FILE_BASENAME=$FILE_BASENAME ; TARGET_FQN=$TARGET_FQN ; FORCE_COPY=$FORCE_COPY"
+ESCAPED_BASENAME="$(printf '%s' "$FILE_BASENAME" | sed 's/[][^$.*/]/\\\\&/g')"
 
 cat > copy.sql <<EOF
 USE ROLE ${SNOW_ROLE};
@@ -46,35 +133,63 @@ USE SCHEMA ${SNOW_SCHEMA};
 
 SELECT CURRENT_ROLE() role, CURRENT_WAREHOUSE() wh, CURRENT_DATABASE() db, CURRENT_SCHEMA() sch;
 
-REMOVE @~ pattern='^${ESCAPED_BASENAME}$';
-PUT file://$PWD/${CSV_PATH} @~ OVERWRITE=TRUE AUTO_COMPRESS=FALSE;
-LIST @~ pattern='^${ESCAPED_BASENAME}$';
+REMOVE @~ PATTERN='${ESCAPED_BASENAME}';
+PUT file://${PWD}/${FILE_BASENAME} @~ OVERWRITE=TRUE AUTO_COMPRESS=FALSE;
+LIST @~ PATTERN='${ESCAPED_BASENAME}';
 
 COPY INTO ${TARGET_FQN}
   FROM @~/${FILE_BASENAME}
-  FILE_FORMAT=(TYPE=CSV SKIP_HEADER=1 FIELD_OPTIONALLY_ENCLOSED_BY=0x22)
+  FILE_FORMAT=(TYPE=CSV SKIP_HEADER=1 FIELD_OPTIONALLY_ENCLOSED_BY='"')
   ON_ERROR=ABORT_STATEMENT
   FORCE=${FORCE_COPY};
 
-SELECT rows_loaded, errors_seen, first_error_message, first_error_line
-FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
-
+-- 结果预览
 SELECT * FROM ${TARGET_FQN} ORDER BY 1 DESC LIMIT 5;
 EOF
 
-echo "===== copy.sql (head) ====="
-sed -n '1,200p' copy.sql || true
-echo "===== end ====="
+echo "---- copy.sql (head) ----"; sed -n '1,200p' copy.sql || true; echo "---- end ----"
 
 snowsql \
   -a "$SNOW_ACCOUNT" -u "$SNOW_USER" -r "$SNOW_ROLE" \
   -w "$SNOW_WAREHOUSE" -d "$SNOW_DATABASE" -s "$SNOW_SCHEMA" \
   --private-key-path "$PRIVATE_KEY_PATH" \
-  -o friendly=false -o exit_on_error=true \
+  -q friendly=false -o exit_on_error=true \
   -f copy.sql
+
 '''
+            }
+          }
+        }
+      }
+      post {
+        success {
+          echo "Loaded ${params.CSV_BASENAME} for COB_DATE=${env.COB_DATE} into ${params.SNOW_DB}.${params.SNOW_SCHEMA}.${params.SNOW_TABLE}"
         }
       }
     }
-  }
+
+  } // stages
+
+} // pipeline
+
+// --- Pod template (与你现有的一致) ---
+String podTemplate() {
+  return """
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: aws-build-tools
+      image: registry.nz.thenational.com/cicd/build/aws-build-tools:1.3
+      imagePullPolicy: Always
+      command: ['sleep']
+      args: ['99d']
+      env:
+        - name: HTTPS_PROXY
+          value: "http://proxy.bnz.co.nz:8085"
+        - name: http_proxy
+          value: "http://proxy.bnz.co.nz:8085"
+        - name: no_proxy
+          value: ".nz.thenational.com"
+"""
 }
