@@ -11,20 +11,20 @@ pipeline {
   options { disableResume() }
 
   parameters {
-    choice(name: 'AWS_ENVIRONMENT', choices: ['nonprod', 'preprod'], description: 'FRR 环境')
-    choice(name: 'TRANSACT_ENVIRONMENT', choices: ['feature-frr-aws', 'feature-test-aws'], description: 'Transact 环境标识')
-    string(name: 'COB_DATE', defaultValue: '', description: 'yyyyMMdd；留空=自动取NZT昨日用于S3路径')
-    // —— 文件与表 —— //
-    string(name: 'CSV_BASENAME', defaultValue: 'BNK_HASH_TOTAL.csv', description: 'reports/<COB_DATE>/ 下的文件名')
-    string(name: 'SNOW_ACCOUNT',  defaultValue: '',   description: 'Snowflake account 名（xxx-xxxx 或主机别名）')
-    string(name: 'SNOW_USER',     defaultValue: '',   description: 'Snowflake 用户')
-    string(name: 'SNOW_ROLE',     defaultValue: '',   description: 'Snowflake 角色')
+    choice(name: 'AWS_ENVIRONMENT', choices: ['nonprod', 'preprod'], description: 'FRR ENV')
+    choice(name: 'TRANSACT_ENVIRONMENT', choices: ['feature-frr-aws', 'feature-test-aws'], description: 'Transact ENV')
+    string(name: 'COB_DATE', defaultValue: '', description: 'yyyyMMdd；')
+
+    string(name: 'CSV_BASENAME', defaultValue: 'BNK_HASH_TOTAL.csv', description: 'reports/<COB_DATE>/HASH TOTAL FILE NAME')
+    string(name: 'SNOW_ACCOUNT',  defaultValue: '',   description: 'Snowflake account')
+    string(name: 'SNOW_USER',     defaultValue: '',   description: 'Snowflake user')
+    string(name: 'SNOW_ROLE',     defaultValue: '',   description: 'Snowflake role')
     string(name: 'SNOW_WH',       defaultValue: '',   description: 'Warehouse')
-    string(name: 'SNOW_DB',       defaultValue: 'DB_investments_dev02', description: '数据库')
+    string(name: 'SNOW_DB',       defaultValue: 'DB_investments_dev02', description: 'db')
     string(name: 'SNOW_SCHEMA',   defaultValue: '',   description: 'Schema')
-    string(name: 'SNOW_TABLE',    defaultValue: 'BNK_HASH_TOTAL', description: '目标表名')
+    string(name: 'SNOW_TABLE',    defaultValue: 'BNK_HASH_TOTAL', description: 'hash total table')
     string(name: 'FORCE_COPY',    defaultValue: 'TRUE', description: 'COPY INTO FORCE=TRUE/FALSE')
-    string(name: 'CREDENTIAL_ID', defaultValue: 'your-ssh-key-id', description: '含 snowsql 私钥的 Jenkins credentialsId')
+    string(name: 'CREDENTIAL_ID', defaultValue: 'snowflake-dev02-key', description: 'TESTAUTO credentials')
   }
 
   stages {
@@ -143,7 +143,6 @@ COPY INTO ${TARGET_FQN}
   ON_ERROR=ABORT_STATEMENT
   FORCE=${FORCE_COPY};
 
--- 结果预览
 SELECT * FROM ${TARGET_FQN} ORDER BY 1 DESC LIMIT 5;
 EOF
 
@@ -172,24 +171,4 @@ snowsql \
 
 } // pipeline
 
-// --- Pod template (与你现有的一致) ---
-String podTemplate() {
-  return """
-apiVersion: v1
-kind: Pod
-spec:
-  containers:
-    - name: aws-build-tools
-      image: registry.nz.thenational.com/cicd/build/aws-build-tools:1.3
-      imagePullPolicy: Always
-      command: ['sleep']
-      args: ['99d']
-      env:
-        - name: HTTPS_PROXY
-          value: "http://proxy.bnz.co.nz:8085"
-        - name: http_proxy
-          value: "http://proxy.bnz.co.nz:8085"
-        - name: no_proxy
-          value: ".nz.thenational.com"
-"""
-}
+// --- Pod template 
