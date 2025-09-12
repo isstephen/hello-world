@@ -1,1 +1,55 @@
+stage('Resolve COB_DATE & locate CSV on S3') {
+  steps {
+    container('aws-build-tools') {
+      script {
+        if (!params.COB_DATE?.trim()) {
+          def tz  = TimeZone.getTimeZone('Pacific/Auckland')
+          def cal = Calendar.getInstance(tz); cal.add(Calendar.DATE, -1)
+          env.COB_DATE = cal.format('yyyyMMdd')
+          echo "Auto-set COB_DATE (NZT yesterday): ${env.COB_DATE}"
+        } else {
+          env.COB_DATE = params.COB_DATE.trim()
+        }
+
+        env.BUCKET_NAME   = "${env.S3_BUCKET_PREFIX}-${params.TRANSACT_ENVIRONMENT}-extracts-${env.AWS_ACCOUNT}"
+        env.REPORT_KEY    = "reports/${env.COB_DATE}/S3_FILESIZES_${env.COB_DATE}.csv"
+        env.REPORT_KEY_OLD = "reports/${env.COB_DATE}/S3_FILESIZES.csv"
+        env.LOCAL_CSV     = "S3_FILESIZES_${env.COB_DATE}.csv"
+
+        echo "Primary : s3://${env.BUCKET_NAME}/${env.REPORT_KEY}"
+        echo "Fallback: s3://${env.BUCKET_NAME}/${env.REPORT_KEY_OLD}"
+      }
+    }
+  }
+}
+
+stage('Download CSV from FRR S3') {
+  steps {
+    container('aws-build-tools') {
+      withBNZVault(secrets: [[ type: 'vaultAWS', accountId: 'aws', role: env.AWS_ROLE_NAME ]]) {
+        sh '''#!/bin/bash
+set -euo pipefail
+command -v aws >/dev/null 2>&1 || { echo "aws cli not found"; exit 127; }
+
+rm -f "$LOCAL_CSV" || true
+
+if aws s3 ls "s3://$BUCKET_NAME/$REPORT_KEY" >/dev/null 2>&1; then
+  aws s3 cp "s3://$BUCKET_NAME/$REPORT_KEY" "$LOCAL_CSV"
+  echo "Downloaded (new): $LOCAL_CSV"
+elif aws s3 ls "s3://$BUCKET_NAME/$REPORT_KEY_OLD" >/dev/null 2>&1; then
+  aws s3 cp "s3://$BUCKET_NAME/$REPORT_KEY_OLD" "$LOCAL_CSV"
+  echo "Downloaded (legacy): $LOCAL_CSV"
+else
+  echo "ERROR: neither exists:"
+  echo "  - s3://$BUCKET_NAME/$REPORT_KEY"
+  echo "  - s3://$BUCKET_NAME/$REPORT_KEY_OLD"
+  exit 1
+fi
+
+echo "Downloaded CSV lines: $(wc -l < "$LOCAL_CSV")"
+'''
+      }
+    }
+  }
+}
 
