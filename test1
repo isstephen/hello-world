@@ -112,15 +112,14 @@ USE SCHEMA ${SNOW_SCHEMA};
 
 PUT file://$PWD/${FILE_BASENAME} @~ OVERWRITE=FALSE AUTO_COMPRESS=FALSE;
 
-COPY INTO ${TARGET_FQN} (NOTICE, VIEW_NAME, TABLE_NAME, EXTRACT_MODE, TOTAL_RECORDS, COB_DATE)
+COPY INTO ${TARGET_FQN} (NOTICE, VIEW_NAME, TABLE_NAME, EXTRACT_MODE, TOTAL_RECORDS)
 FROM (
   SELECT
     $1,
     $2,
     $3,
     $4,
-    TRY_TO_NUMBER($5),
-    '${COB_DATE}'
+    TRY_TO_NUMBER($5)
   FROM @~/${FILE_BASENAME}
 )
 FILE_FORMAT = (
@@ -161,7 +160,7 @@ snowsql \
   }
 }
 
-/* Pod 模板（与你其它流水线一致） */
+/* Pod */
 String podTemplate() {
   return """
 apiVersion: "v1"
