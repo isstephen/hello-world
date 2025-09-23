@@ -8,7 +8,6 @@ pipeline {
       yamlMergeStrategy merge()
     }
   }
-
   options { disableResume() }
 
   stages {
@@ -16,30 +15,29 @@ pipeline {
     stage('Set Env Vars (FRR account & bucket)') {
       steps {
         script {
-          def awsRoleName; def awsAccount; def s3BucketPrefix
-          switch (params.AWS_ENVIRONMENT) {
-            case 'nonprod':
-              if (params.TRANSACT_ENVIRONMENT == 'feature-frr-aws') {
-                awsRoleName    = 'frr-templt-nonprod-dev-jenkins'
-                awsAccount     = '752177477252'
-                s3BucketPrefix = 'frr-nonprod'
-                break
-              }
-              if (params.TRANSACT_ENVIRONMENT == 'feature-test-aws') {
-                awsRoleName    = 'frr-templt-nonprod-test-jenkins'
-                awsAccount     = '752177477252'
-                s3BucketPrefix = 'frr-nonprod'
-                break
-              }
-            case 'preprod':
-              awsRoleName    = 'frr-templt-preprod-ppte-jenkins'
-              awsAccount     = '851725356859'
-              s3BucketPrefix = 'frr-preprod'
-              break
-          }
-          env.AWS_ROLE_NAME  = awsRoleName
-          env.AWS_ACCOUNT    = awsAccount
-          env.S3_BUCKET_PREFIX = s3BucketPrefix
+          def envParam = params.AWS_ENVIRONMENT?.trim()
+          def txnParam = params.TRANSACT_ENVIRONMENT?.trim()
+          if (!envParam) error "Missing AWS_ENVIRONMENT"
+          if (!txnParam) error "Missing TRANSACT_ENVIRONMENT"
+
+          def map = [
+            'nonprod': [
+              'feature-frr-aws' : [role:'frr-templt-nonprod-dev-jenkins' , acct:'752177477252', prefix:'frr-nonprod'],
+              'feature-test-aws': [role:'frr-templt-nonprod-test-jenkins', acct:'752177477252', prefix:'frr-nonprod'],
+            ],
+            'preprod': [
+              'migl-aws'       : [role:'frr-templt-preprod-ppte-jenkins', acct:'851725356859', prefix:'frr-preprod'],
+              'mig2-aws'       : [role:'frr-templt-preprod-ppte-jenkins', acct:'851725356859', prefix:'frr-preprod'],
+              'performance-aws': [role:'frr-templt-preprod-ppte-jenkins', acct:'851725356859', prefix:'frr-preprod'],
+              'e2e-test'       : [role:'frr-templt-preprod-ppte-jenkins', acct:'851725356859', prefix:'frr-preprod'],
+            ]
+          ]
+          def cfg = map[envParam]?.get(txnParam)
+          if (!cfg) error "Unsupported combination: ${envParam}/${txnParam}"
+
+          env.AWS_ROLE_NAME     = cfg.role
+          env.AWS_ACCOUNT       = cfg.acct
+          env.S3_BUCKET_PREFIX  = cfg.prefix
         }
       }
     }
@@ -56,9 +54,8 @@ pipeline {
             } else {
               env.COB_DATE = params.COB_DATE.trim()
             }
-
             env.BUCKET_NAME = "${env.S3_BUCKET_PREFIX}-${params.TRANSACT_ENVIRONMENT}-extracts-${env.AWS_ACCOUNT}"
-            env.LOCAL_CSV   = "VIEW_DDLS_${env.COB_DATE}.csv"
+            env.LOCAL_CSV   = "TABLE_COUNTS_${env.COB_DATE}.csv"
             env.REPORT_KEY  = "reports/${env.COB_DATE}/${env.LOCAL_CSV}"
             echo "S3 file => s3://${env.BUCKET_NAME}/${env.REPORT_KEY}"
           }
@@ -73,20 +70,18 @@ pipeline {
             sh '''#!/bin/bash
 set -euo pipefail
 command -v aws >/dev/null 2>&1 || { echo "aws cli not found"; exit 127; }
-
 rm -f "$LOCAL_CSV" || true
 aws s3 ls "s3://$BUCKET_NAME/$REPORT_KEY" >/dev/null
 aws s3 cp "s3://$BUCKET_NAME/$REPORT_KEY" "$LOCAL_CSV"
-
-echo "Downloaded -> $LOCAL_CSV"
-wc -l "$LOCAL_CSV" || true
+echo "Header:"; head -n 1 "$LOCAL_CSV" || true
+echo "Rows: $(wc -l < "$LOCAL_CSV")"
 '''
           }
         }
       }
     }
 
-    stage('Snowflake: PUT + COPY VIEW_DDLS') {
+    stage('Snowflake: PUT + COPY TABLE_COUNTS') {
       steps {
         container('dap-build-tools') {
           withCredentials([sshUserPrivateKey(credentialsId: params.CREDENTIAL_ID, keyFileVariable: 'PRIVATE_KEY_PATH')]) {
@@ -97,56 +92,60 @@ wc -l "$LOCAL_CSV" || true
               "SNOW_WAREHOUSE=${params.SNOW_WH}",
               "SNOW_DATABASE=${params.SNOW_DB}",
               "SNOW_SCHEMA=${params.SNOW_SCHEMA}",
-              "SNOW_TABLE=${params.SNOW_TABLE ?: 'VIEW_DDLS'}",
-              "CSV_DELIM=${params.CSV_DELIM ?: '~'}",     // change via param if comma CSV
+              "SNOW_TABLE=${params.SNOW_TABLE ?: 'TABLE_COUNTS'}",
+              "CSV_DELIM=${params.CSV_DELIM ?: ','}",
               "FORCE_COPY=${params.FORCE_COPY ?: 'FALSE'}"
             ]) {
               sh '''#!/bin/bash
 set -euo pipefail
-
 command -v snowsql >/dev/null 2>&1 || { echo "snowsql not found"; exit 127; }
 
 FILE_BASENAME="$LOCAL_CSV"
 TARGET_FQN="${SNOW_DATABASE}.${SNOW_SCHEMA}.${SNOW_TABLE}"
-
-# ensure file exists
 [ -f "$FILE_BASENAME" ] || { echo "CSV not found: $FILE_BASENAME"; ls -la; exit 66; }
 
-# build COPY script
 cat > copy.sql <<SQL
 USE ROLE ${SNOW_ROLE};
 USE WAREHOUSE ${SNOW_WAREHOUSE};
 USE DATABASE ${SNOW_DATABASE};
 USE SCHEMA ${SNOW_SCHEMA};
 
--- do not overwrite existing staged file version (lets FORCE=FALSE truly skip)
 PUT file://$PWD/${FILE_BASENAME} @~ OVERWRITE=FALSE AUTO_COMPRESS=FALSE;
 
-COPY INTO ${TARGET_FQN}
-FROM @~/${FILE_BASENAME}
+COPY INTO ${TARGET_FQN} (NOTICE, VIEW_NAME, TABLE_NAME, EXTRACT_MODE, TOTAL_RECORDS, COB_DATE)
+FROM (
+  SELECT
+    $1,
+    $2,
+    $3,
+    $4,
+    TRY_TO_NUMBER($5),
+    '${COB_DATE}'
+  FROM @~/${FILE_BASENAME}
+)
 FILE_FORMAT = (
   TYPE = CSV
+  PARSE_HEADER = TRUE
   FIELD_DELIMITER = '${CSV_DELIM}'
-  SKIP_HEADER = 1
   FIELD_OPTIONALLY_ENCLOSED_BY = '"'
   TRIM_SPACE = TRUE
   SKIP_BYTE_ORDER_MARK = TRUE
   EMPTY_FIELD_AS_NULL = TRUE
 )
-MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE
 ON_ERROR = ABORT_STATEMENT
 FORCE = ${FORCE_COPY};
 
--- quick peek
 SELECT * FROM ${TARGET_FQN} ORDER BY 1 DESC LIMIT 5;
 SQL
 
-echo "===== copy.sql (head) ====="; sed -n '1,180p' copy.sql || true; echo "===== end ====="
+echo "===== copy.sql (head) ====="; sed -n '1,220p' copy.sql || true; echo "===== end ====="
 
 snowsql \
   -a "$SNOW_ACCOUNT" -u "$SNOW_USER" -r "$SNOW_ROLE" \
   -w "$SNOW_WAREHOUSE" -d "$SNOW_DATABASE" -s "$SNOW_SCHEMA" \
-  -f copy.sql -o friendly=false -o exit_on_error=true
+  --private-key-path "$PRIVATE_KEY_PATH" \
+  -o friendly=false -o exit_on_error=true \
+  -f copy.sql
 '''
             }
           }
@@ -157,12 +156,12 @@ snowsql \
 
   post {
     success {
-      echo "Loaded ${env.LOCAL_CSV} (COB_DATE=${env.COB_DATE}) into ${params.SNOW_DB}.${params.SNOW_SCHEMA}.${params.SNOW_TABLE ?: 'VIEW_DDLS'}"
+      echo "Loaded ${env.LOCAL_CSV} for COB_DATE=${env.COB_DATE} into ${params.SNOW_DB}.${params.SNOW_SCHEMA}.${params.SNOW_TABLE ?: 'TABLE_COUNTS'}"
     }
   }
 }
 
-/* ---- Pod template: same image as your other pipelines ---- */
+/* Pod 模板（与你其它流水线一致） */
 String podTemplate() {
   return """
 apiVersion: "v1"
@@ -182,8 +181,8 @@ spec:
     resources:
       limits: { memory: "512Mi", cpu: "1" }
       requests: { memory: "128Mi", cpu: "0.1", ephemeral-storage: "64Mi" }
-    securityContext:
-      runAsUser: 1001
+    securityContext: { runAsUser: 1001 }
 """
 }
+
 
