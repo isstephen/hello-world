@@ -96,5 +96,26 @@ u AS (
 )
 SELECT * FROM u ORDER BY non_null DESC;
 
+-- 所有列 & 重点筛选：金额候选列（名字或类型像金额/本金/承诺额）
+SELECT column_name, data_type, ordinal_position
+FROM DB_INVESTMENTS_SYST02.INFORMATION_SCHEMA.COLUMNS
+WHERE table_schema = 'INVESTMENTS_SERVE'
+  AND table_name   = 'BNK_AA_ARR_TERM_AMOUNT'
+ORDER BY ordinal_position;
+
+
+SELECT column_name, data_type
+FROM DB_INVESTMENTS_SYST02.INFORMATION_SCHEMA.COLUMNS
+WHERE table_schema = 'INVESTMENTS_SERVE'
+  AND table_name   = 'BNK_AA_ARR_TERM_AMOUNT'
+  AND (
+    data_type ILIKE '%NUMBER%' OR
+    column_name ILIKE '%AMT%' OR
+    column_name ILIKE '%AMOUNT%' OR
+    column_name ILIKE '%PRINCIPAL%' OR
+    column_name ILIKE '%COMMIT%'
+  )
+ORDER BY column_name;
+
 
 
