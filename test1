@@ -1,1 +1,29 @@
+payment_schedule_latest AS (
+  SELECT
+    SPLIT_PART(ps.ARRANGEMENT_KEY,'-',1)                            AS ARRANGEMENT_ID,
+    UPPER(ps.PAYMENT_TYPE)                                          AS PAYMENT_TYPE,
+    UPPER(ps.PAYMENT_METHOD)                                        AS PAYMENT_METHOD,
+    UPPER(ps.PAYMENT_FREQ)                                          AS PAYMENT_FREQ,
+    COALESCE(
+      TRY_TO_DATE(SPLIT_PART(ps.ID_COMP_3,'-',1),'YYYYMMDD'),
+      ps.MIS_DATE::DATE
+    )                                                               AS ID_DATE,
+    ps.MIS_DATE
+  FROM DB_INVESTMENTS_SYST02.INVESTMENTS_SERVE.BNK_AA_ARR_PAYMENT_SCHEDULE ps,
+       cob
+  WHERE
+    UPPER(ps.PAYMENT_TYPE) LIKE 'INTEREST%'
+    AND COALESCE(
+          TRY_TO_DATE(SPLIT_PART(ps.ID_COMP_3,'-',1),'YYYYMMDD'),
+          ps.MIS_DATE::DATE
+        ) <= cob.cob_date
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY SPLIT_PART(ps.ARRANGEMENT_KEY,'-',1)
+    ORDER BY COALESCE(
+             TRY_TO_DATE(SPLIT_PART(ps.ID_COMP_3,'-',1),'YYYYMMDD'),
+             ps.MIS_DATE::DATE
+           ) DESC,
+           ps.MIS_DATE DESC
+  ) = 1
+)
 
