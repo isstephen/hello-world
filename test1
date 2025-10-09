@@ -97,24 +97,29 @@ payment_schedule_latest AS (
 
 ------5) Current Balance / Accrual period （BNK_AA_INTEREST_ACCRUALS）---------
    仅 DEPOSITINT，TO_DATE = COB_DATE */
-accruals_today AS (
-  SELECT
-    REGEXP_SUBSTR(ia.PROPERTY_NAME,'AA[0-9A-Z]+') AS ARRANGEMENT_ID,
-    TRY_TO_DECIMAL(
-      SPLIT(ia.BALANCE, HEX_DECODE_STRING('EFA3BD'))[idx.index]::STRING, 38, 2
-    )                                             AS BALANCE,
-    TRY_TO_DATE(
-      SPLIT(ia.PERIOD_START, HEX_DECODE_STRING('EFA3BD'))[idx.index]::STRING,'YYYYMMDD'
-    )                                             AS PERIOD_START,
-    TRY_TO_DATE(
-      SPLIT(ia.PERIOD_END, HEX_DECODE_STRING('EFA3BD'))[idx.index]::STRING,'YYYYMMDD'
-    )                                             AS PERIOD_END
-  FROM DB_INVESTMENTS_SYST02.INVESTMENTS_SERVE.BNK_AA_INTEREST_ACCRUALS ia,
-       LATERAL FLATTEN(input => SPLIT(ia.TO_DATE, HEX_DECODE_STRING('EFA3BD'))) idx,
-       cob
-  WHERE REGEXP_SUBSTR(ia.PROPERTY_NAME,'AA[0-9A-Z]+') IS NOT NULL
-    AND UPPER(ia.PROPERTY_NAME) LIKE '%-DEPOSITINT-%'
-    AND TRY_TO_DATE(idx.value::STRING,'YYYYMMDD') = (SELECT cob_date FROM cob)
+accruals_latest AS (
+  WITH rows_ AS (
+    SELECT
+      REGEXP_SUBSTR(ia.PROPERTY_NAME,'AA[0-9A-Z]+') AS ARRANGEMENT_ID,
+      TRY_TO_DATE(f.value::STRING,'YYYYMMDD')       AS TO_DATE,
+      TRY_TO_DECIMAL( SPLIT(ia.BALANCE,      HEX_DECODE_STRING('EFA3BD'))[f.index]::STRING, 38, 2) AS BALANCE,
+      TRY_TO_DATE(  SPLIT(ia.PERIOD_START,   HEX_DECODE_STRING('EFA3BD'))[f.index]::STRING,'YYYYMMDD') AS PERIOD_START,
+      TRY_TO_DATE(  SPLIT(ia.PERIOD_END,     HEX_DECODE_STRING('EFA3BD'))[f.index]::STRING,'YYYYMMDD') AS PERIOD_END
+    FROM DB_INVESTMENTS_SYST02.INVESTMENTS_SERVE.BNK_AA_INTEREST_ACCRUALS ia,
+         LATERAL FLATTEN(input => SPLIT(ia.TO_DATE, HEX_DECODE_STRING('EFA3BD'))) f,
+         (SELECT MAX(COB_DAY_DATE) AS cob_date
+          FROM DB_INVESTMENTS_SYST02.INVESTMENTS_SERVE.V_INT_COB_DAYS) cob
+    WHERE REGEXP_SUBSTR(ia.PROPERTY_NAME,'AA[0-9A-Z]+') IS NOT NULL
+      -- 放宽匹配，避免被 '-DEPOSITINT-' 卡住
+      AND UPPER(ia.PROPERTY_NAME) LIKE '%DEPOSITINT%'
+      AND TRY_TO_DATE(f.value::STRING,'YYYYMMDD') <= cob.cob_date
+  )
+  SELECT *
+  FROM rows_
+  QUALIFY ROW_NUMBER() OVER (
+           PARTITION BY ARRANGEMENT_ID
+           ORDER BY TO_DATE DESC
+         ) = 1
 )
 
 ----------Final Output----------------------------------------
