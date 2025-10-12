@@ -1,4 +1,4 @@
--- Interest Calculation 
+
 CREATE OR REPLACE VIEW DB_INVESTMENTS_SYST02.INVESTMENTS_SERVE.EXPECTED_INTEREST AS
 WITH src AS (
   SELECT
@@ -6,32 +6,54 @@ WITH src AS (
     ACTIVE_PRODUCT,
     ALT_ID,
     CUSTOMER,
-    UPPER(TRIM(COALESCE(DAY_BASIS,'E')))                       AS DAY_BASIS,
-    TO_DECIMAL(TRY_TO_NUMBER(EFFECTIVE_RATE), 18, 9)           AS EFFECTIVE_RATE_N,
-    UPPER(TRIM(COALESCE(PAYMENT_METHOD,'')))                   AS PAYMENT_METHOD,
+    UPPER(TRIM(COALESCE(DAY_BASIS,'E')))                                        AS DAY_BASIS,
+    TO_DECIMAL(TRY_TO_NUMBER(EFFECTIVE_RATE), 18, 9)                            AS EFFECTIVE_RATE_N,
+    UPPER(TRIM(COALESCE(PAYMENT_METHOD,'')))                                    AS PAYMENT_METHOD,
     PAYMENT_FREQ,
-    TRY_TO_DATE(PERIOD_START)                                  AS PERIOD_START,
-    TRY_TO_DATE(PERIOD_END)                                    AS PERIOD_END,
-    TO_DECIMAL(TRY_TO_NUMBER(BALANCE),        38, 2)           AS PRINCIPAL
-  FROM DB_INVESTMENTS_SYST02.INVESTMENTS_SERVE.INTEREST_FIELD_3
+    TRY_TO_DATE(PERIOD_START)                                                   AS PERIOD_START,
+    TRY_TO_DATE(PERIOD_END)                                                     AS PERIOD_END,
+    TO_DECIMAL(TRY_TO_NUMBER(BALANCE), 38, 2)                                   AS PRINCIPAL
+  FROM DB_INVESTMENTS_SYST02.INVESTMENTS_SERVE.INTEREST_FIELDS_3
 ),
 norm AS (
   SELECT
     s.*,
-    CASE WHEN DAY_BASIS IN ('E','365') THEN 365 ELSE 365 END   AS DENOM,
-    CASE
-      WHEN EFFECTIVE_RATE_N IS NULL THEN NULL
-      WHEN EFFECTIVE_RATE_N > 1 THEN EFFECTIVE_RATE_N / 100
-      ELSE EFFECTIVE_RATE_N
-    END                                                       AS RATE_DECIMAL,
-    DATEDIFF('day', PERIOD_START, PERIOD_END)                  AS DAYS_EXCL_END,
-    DATEDIFF('day', PERIOD_START, PERIOD_END) + 1              AS DAYS_INCL_END
+    CAST(
+      CASE
+        WHEN DAY_BASIS IN ('E','365','ACT/365','ACT365') THEN 365.0
+        WHEN DAY_BASIS IN ('360','ACT/360','ACT360')      THEN 360.0
+        ELSE 365.0
+      END
+      AS DECIMAL(18,9)
+    )                                                                            AS DENOM,
+    CAST(
+      CASE
+        WHEN EFFECTIVE_RATE_N IS NULL THEN NULL
+        WHEN EFFECTIVE_RATE_N > 1   THEN EFFECTIVE_RATE_N / 100.0
+        ELSE EFFECTIVE_RATE_N
+      END
+      AS DECIMAL(18,9)
+    )                                                                            AS RATE_DECIMAL,
+    DATEDIFF('day', PERIOD_START, PERIOD_END)                                    AS DAYS_EXCL_END,
+    DATEDIFF('day', PERIOD_START, PERIOD_END) + 1                                AS DAYS_INCL_END
   FROM src s
+),
+validated AS (
+  SELECT
+    n.*,
+    CASE
+      WHEN PERIOD_START IS NULL OR PERIOD_END IS NULL THEN 'MISSING_DATES'
+      WHEN PERIOD_END   <  PERIOD_START          THEN 'NEGATIVE_WINDOW'
+      WHEN RATE_DECIMAL IS NULL                  THEN 'MISSING_RATE'
+      WHEN PRINCIPAL    IS NULL                  THEN 'MISSING_PRINCIPAL'
+      ELSE 'OK'
+    END AS QUALITY_STATUS
+  FROM norm n
 ),
 calc AS (
   SELECT
     ARRANGEMENT_ID,
-    ACTIVE_PRODUCT AS PRODUCT_ID,
+    ACTIVE_PRODUCT                                                              AS PRODUCT_ID,
     ALT_ID,
     CUSTOMER,
     PAYMENT_METHOD,
@@ -42,15 +64,33 @@ calc AS (
     PRINCIPAL,
     EFFECTIVE_RATE_N,
     RATE_DECIMAL,
-    ROUND(PRINCIPAL * RATE_DECIMAL / DENOM, 8)                                            AS DAILY_ACCRUAL,
-    ROUND(PRINCIPAL * RATE_DECIMAL * (DAYS_EXCL_END::FLOAT / DENOM), 2)                   AS INTEREST_EXCL_END,
-    ROUND(PRINCIPAL * RATE_DECIMAL * (DAYS_INCL_END::FLOAT / DENOM), 2)                   AS INTEREST_INCL_END,
-    ROUND(PRINCIPAL * RATE_DECIMAL * (DAYS_EXCL_END::FLOAT / DENOM), 2)                   AS EXPECTED_INTEREST,
-    CASE WHEN PAYMENT_METHOD = 'CAPITALISE'
-         THEN ROUND(PRINCIPAL + (PRINCIPAL * RATE_DECIMAL * (DAYS_EXCL_END::FLOAT / DENOM)), 2)
+    QUALITY_STATUS,
+
+    CASE WHEN QUALITY_STATUS = 'OK'
+         THEN ROUND((PRINCIPAL * RATE_DECIMAL) / DENOM, 8)
+         ELSE CAST(NULL AS DECIMAL(38,8))
+    END                                                                          AS DAILY_ACCRUAL,
+
+    CASE WHEN QUALITY_STATUS = 'OK'
+         THEN ROUND((PRINCIPAL * RATE_DECIMAL) * (CAST(DAYS_EXCL_END AS FLOAT) / DENOM), 2)
+         ELSE CAST(NULL AS DECIMAL(38,2))
+    END                                                                          AS INTEREST_EXCL_END,
+
+    CASE WHEN QUALITY_STATUS = 'OK'
+         THEN ROUND((PRINCIPAL * RATE_DECIMAL) * (CAST(DAYS_INCL_END AS FLOAT) / DENOM), 2)
+         ELSE CAST(NULL AS DECIMAL(38,2))
+    END                                                                          AS INTEREST_INCL_END,
+
+    CASE WHEN QUALITY_STATUS = 'OK'
+         THEN ROUND((PRINCIPAL * RATE_DECIMAL) * (CAST(DAYS_EXCL_END AS FLOAT) / DENOM), 2)
+         ELSE CAST(NULL AS DECIMAL(38,2))
+    END                                                                          AS EXPECTED_INTEREST,
+
+    CASE WHEN QUALITY_STATUS = 'OK' AND PAYMENT_METHOD = 'CAPITALISE'
+         THEN ROUND(PRINCIPAL + (PRINCIPAL * RATE_DECIMAL) * (CAST(DAYS_EXCL_END AS FLOAT) / DENOM), 2)
          ELSE PRINCIPAL
-    END                                                                                   AS NEXT_PRINCIPAL_IF_CAPITALISE
-  FROM norm
+    END                                                                          AS NEXT_PRINCIPAL_IF_CAPITALISE
+  FROM validated
 )
 SELECT *
 FROM calc
