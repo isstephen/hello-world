@@ -1,4 +1,4 @@
--- Interest Calculation (修正版：统一为 DECIMAL，避免 NUMBER(38,0) 与 (38,2) 混用)
+-- Interest Calculation 
 CREATE OR REPLACE VIEW DB_INVESTMENTS_SYST02.INVESTMENTS_SERVE.EXPECTED_INTEREST AS
 WITH src AS (
   SELECT
@@ -7,7 +7,6 @@ WITH src AS (
     ALT_ID,
     CUSTOMER,
     UPPER(TRIM(COALESCE(DAY_BASIS,'E')))                       AS DAY_BASIS,
-    -- 显式转为带小数位的小数类型
     TO_DECIMAL(TRY_TO_NUMBER(EFFECTIVE_RATE), 18, 9)           AS EFFECTIVE_RATE_N,
     UPPER(TRIM(COALESCE(PAYMENT_METHOD,'')))                   AS PAYMENT_METHOD,
     PAYMENT_FREQ,
@@ -20,13 +19,11 @@ norm AS (
   SELECT
     s.*,
     CASE WHEN DAY_BASIS IN ('E','365') THEN 365 ELSE 365 END   AS DENOM,
-    -- 利率归一：>1 视为百分比（例如 2.4 -> 0.024）
     CASE
       WHEN EFFECTIVE_RATE_N IS NULL THEN NULL
       WHEN EFFECTIVE_RATE_N > 1 THEN EFFECTIVE_RATE_N / 100
       ELSE EFFECTIVE_RATE_N
     END                                                       AS RATE_DECIMAL,
-    -- 天数：起含止不含 & 含期末两种口径都给出
     DATEDIFF('day', PERIOD_START, PERIOD_END)                  AS DAYS_EXCL_END,
     DATEDIFF('day', PERIOD_START, PERIOD_END) + 1              AS DAYS_INCL_END
   FROM src s
@@ -45,15 +42,10 @@ calc AS (
     PRINCIPAL,
     EFFECTIVE_RATE_N,
     RATE_DECIMAL,
-    -- 日应计
     ROUND(PRINCIPAL * RATE_DECIMAL / DENOM, 8)                                            AS DAILY_ACCRUAL,
-    -- 利息（起含止不含）
     ROUND(PRINCIPAL * RATE_DECIMAL * (DAYS_EXCL_END::FLOAT / DENOM), 2)                   AS INTEREST_EXCL_END,
-    -- 利息（含期末）
     ROUND(PRINCIPAL * RATE_DECIMAL * (DAYS_INCL_END::FLOAT / DENOM), 2)                   AS INTEREST_INCL_END,
-    -- 默认口径：起含止不含
     ROUND(PRINCIPAL * RATE_DECIMAL * (DAYS_EXCL_END::FLOAT / DENOM), 2)                   AS EXPECTED_INTEREST,
-    -- 若支付方式为 CAPITALISE，次日滚入本金（演示列）
     CASE WHEN PAYMENT_METHOD = 'CAPITALISE'
          THEN ROUND(PRINCIPAL + (PRINCIPAL * RATE_DECIMAL * (DAYS_EXCL_END::FLOAT / DENOM)), 2)
          ELSE PRINCIPAL
